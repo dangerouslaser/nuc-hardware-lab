@@ -19,6 +19,16 @@ open questions with what we now know and turns them into experiments.
 - §5: the lab patch, `dvprobe`, the reference and negative frames and the
   `dvlab` image variant are in `image/dvlab/` and `image/rootfs`.
 
+- **Result (report #8, 2026-11-08): H4.** C1 and C2 pass (full range
+  correct; the HDR logo shows, so the GMP SDP is forwarded). H1, H1b and H2
+  give no Dolby Vision, and the negative control behaves the same. The DP RX
+  CRC equals the framebuffer CRC in every step, and the readback confirms the
+  exact DIP bytes. FW 1.77 converts the GMP SDP with type 0x87 but not 0x81,
+  and does not forward the VS DIP. 0x5B0-0x5FF NAKs reads. Written up in
+  libreelec-yblod `yblod-engine/docs/intel-dv/VALIDATION.md`; DV stays off
+  LSPCON routes. The driver work is parked on libreelec-yblod branch
+  `feature/nuc7-lspcon-dv` (linux-9930).
+
 ## 1. What is now confirmed
 
 Source: volunteer report, `dangerouslaser/nuclab-reports` issue #6. Decrypt it
