@@ -27,7 +27,7 @@ apk add -q --no-progress --root "$ROOT" --initdb --no-scripts \
 	busybox busybox-binsh alpine-baselayout-data musl-utils \
 	kmod curl ca-certificates-bundle jq \
 	pciutils i2c-tools drm_info libdrm-tests libdisplay-info-tools \
-	wpa_supplicant >/dev/null
+	wpa_supplicant age >/dev/null
 rm -rf "$ROOT/var/cache/apk"/* "$ROOT/etc/apk/keys"
 # Busybox applet links (scripts were skipped).
 chroot "$ROOT" /bin/busybox --install -s
@@ -110,6 +110,10 @@ ID=nuclab
 PRETTY_NAME="NUC Display Lab survey $VERSION"
 VERSION_ID=$VERSION
 EOF
+# Public key(s) that report archives are encrypted to before upload.
+mkdir -p "$ROOT/etc/nuclab"
+grep -E '^age1[0-9a-z]+$' "$SRC/report-recipients.txt" >"$ROOT/etc/nuclab/recipients.txt" ||
+	{ echo "image/report-recipients.txt has no age public key" >&2; exit 1; }
 # Baked-in defaults (a nuclab.conf on the USB stick overrides them).
 install -m 0600 /dev/null "$ROOT/etc/nuclab.conf"
 [ -f "$SRC/local.conf" ] && grep -E '^[A-Z_]+=' "$SRC/local.conf" >"$ROOT/etc/nuclab.conf" || true

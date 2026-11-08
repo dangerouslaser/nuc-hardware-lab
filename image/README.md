@@ -5,9 +5,15 @@ It boots straight into a read-only display survey, so no Linux knowledge is
 needed. It identifies the NUC's DP-to-HDMI converter (MegaChips MCDP2800 or
 not) and collects display diagnostics. The report is then:
 
-1. saved to `reports/` on the stick
-2. committed to a private GitHub repo, with an issue opened for it
+1. saved to `reports/` on the stick (unencrypted, for the volunteer)
+2. encrypted with [age](https://age-encryption.org) to the public key in
+   `report-recipients.txt`, committed to a private GitHub repo, and announced
+   by an issue that carries only the non-sensitive summary (no volunteer answers,
+   no raw EDIDs or logs)
 3. announced through an ntfy push notification
+
+Decrypt a report with `sh image/tools/get-report.sh <issue number>` (needs the
+private key at `~/.config/nuclab/report-key.txt`, which is never committed).
 
 It runs entirely from RAM (Alpine Linux 3.24 userspace, `linux-lts` kernel).
 The image contains no SATA, NVMe or eMMC drivers, so it cannot see or modify
@@ -62,9 +68,10 @@ Create one at <https://github.com/settings/personal-access-tokens/new>:
 - **Permissions:** Issues → Read and write; Contents → Read and write
 - **Expiration:** short (for example 30 days). Revoke it when testing is done.
 
-**Anyone who has the image can extract the token.** At worst they could spam
-issues or files in that single private repo. Never use a classic token or your
-`gh` login token here.
+**Anyone who has the image can extract the token.** GitHub has no write-only
+permission, so they could read that repo too, but they would find only
+public summaries and encrypted archives. At worst they could spam it. Never
+use a classic token or your `gh` login token here.
 
 ## Volunteer instructions
 

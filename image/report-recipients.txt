@@ -1,0 +1,3 @@
+# age public keys that uploaded report archives are encrypted to.
+# The matching private key is kept outside the repo (~/.config/nuclab/report-key.txt).
+age10lttpjhuqeayuncn30780rg0gzdyqxsxavf6eh4p636tq6g6mv4svgd2ma

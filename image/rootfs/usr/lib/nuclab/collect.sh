@@ -122,3 +122,4 @@ grep -E 'branch: OUI|sink: OUI|LSPCON|lspcon|Mega Chips|Parade|DP-HDMI|dual mode
 # --- summary -----------------------------------------------------------------
 . /usr/lib/nuclab/summarize.sh
 summarize "$OUT" >"$OUT/summary.txt"
+summarize "$OUT" public >"$OUT/summary-public.txt"

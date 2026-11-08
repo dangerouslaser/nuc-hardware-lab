@@ -1,10 +1,14 @@
 #!/bin/sh
 # upload.sh ARCHIVE REPORTDIR RESULTFILE
 #
-# 1. GitHub: commit ARCHIVE to reports/ in GITHUB_REPO and open an issue with
-#    the summary. Needs GITHUB_REPO and GITHUB_TOKEN.
-# 2. If GitHub is not configured or fails: upload ARCHIVE to a temporary file
-#    host (FALLBACK_UPLOAD=litterbox|0x0|none).
+# The archive is encrypted with age to /etc/nuclab/recipients.txt before it
+# leaves the machine; without a recipient it is not uploaded at all. Only the
+# public summary (no volunteer answers, no raw EDID/logs) is sent in clear.
+#
+# 1. GitHub: commit the encrypted archive to reports/ in GITHUB_REPO and open
+#    an issue with the public summary. Needs GITHUB_REPO and GITHUB_TOKEN.
+# 2. If GitHub is not configured or fails: upload the encrypted archive to a
+#    temporary file host (FALLBACK_UPLOAD=litterbox|0x0|none).
 # 3. ntfy: push the result and links to NTFY_SERVER/NTFY_TOPIC, if set.
 #
 # Writes KEY=VALUE lines to RESULTFILE. Every step logs and carries on.
@@ -21,9 +25,18 @@ trap 'rm -rf "$T"' EXIT
 UA="nuclab-survey/1"
 log() { echo "[upload] $*" >&2; }
 
-name=${ARCHIVE##*/}
-verdict=$(sed -n 's/^Result: //p' "$REPORT/summary.txt" | head -1)
-system=$(sed -n 's/^System: *//p' "$REPORT/summary.txt" | head -1)
+PUBLIC=$REPORT/summary-public.txt
+verdict=$(sed -n 's/^Result: //p' "$PUBLIC" | head -1)
+system=$(sed -n 's/^System: *//p' "$PUBLIC" | head -1)
+
+RECIPIENTS=/etc/nuclab/recipients.txt
+ENC=""
+if [ -s "$RECIPIENTS" ] && age -R "$RECIPIENTS" -o "$T/${ARCHIVE##*/}.age" "$ARCHIVE" 2>"$T/err"; then
+	ENC=$T/${ARCHIVE##*/}.age
+	name=${ENC##*/}
+else
+	log "encryption unavailable ($(cat "$T/err" 2>/dev/null)); the archive will NOT be uploaded"
+fi
 
 gh_api() { # gh_api METHOD PATH [JSONFILE] -> body in $T/resp, prints HTTP code
 	set -- "$1" "$2" "${3:-}"
@@ -39,25 +52,29 @@ issue_url=""
 archive_url=""
 
 if [ -n "$GITHUB_REPO" ] && [ -n "$GITHUB_TOKEN" ]; then
-	log "committing archive to $GITHUB_REPO"
-	base64 "$ARCHIVE" | tr -d '\n' >"$T/b64"
-	jq -n --arg m "Add survey report $name" --rawfile c "$T/b64" \
-		'{message: $m, content: $c}' >"$T/put.json"
-	code=$(gh_api PUT "/repos/$GITHUB_REPO/contents/reports/$name" "$T/put.json")
-	if [ "$code" = 201 ] || [ "$code" = 200 ]; then
-		archive_url=$(jq -r '.content.html_url // empty' "$T/resp")
-	else
-		log "archive commit failed: HTTP $code $(jq -r '.message // empty' "$T/resp" 2>/dev/null) $(cat "$T/err")"
+	if [ -n "$ENC" ]; then
+		log "committing encrypted archive to $GITHUB_REPO"
+		base64 "$ENC" | tr -d '\n' >"$T/b64"
+		jq -n --arg m "Add survey report $name" --rawfile c "$T/b64" \
+			'{message: $m, content: $c}' >"$T/put.json"
+		code=$(gh_api PUT "/repos/$GITHUB_REPO/contents/reports/$name" "$T/put.json")
+		if [ "$code" = 201 ] || [ "$code" = 200 ]; then
+			archive_url=$(jq -r '.content.html_url // empty' "$T/resp")
+		else
+			log "archive commit failed: HTTP $code $(jq -r '.message // empty' "$T/resp" 2>/dev/null) $(cat "$T/err")"
+		fi
 	fi
 
 	log "opening issue"
 	{
 		echo '```'
-		cat "$REPORT/summary.txt"
+		cat "$PUBLIC"
 		echo '```'
 		echo
 		if [ -n "$archive_url" ]; then
-			echo "Full archive: $archive_url"
+			echo "Full archive (age-encrypted, includes the volunteer's answers): $archive_url"
+		elif [ -z "$ENC" ]; then
+			echo "Full archive: not uploaded (no encryption key in the image). Ask the volunteer for the copy on the USB stick."
 		else
 			echo "Full archive: upload to the repository failed (see fallback link in a comment, if any)."
 		fi
@@ -92,24 +109,24 @@ else
 	log "GitHub upload not configured"
 fi
 
-if [ -z "$archive_url" ]; then
+if [ -z "$archive_url" ] && [ -n "$ENC" ]; then
 	case $FALLBACK_UPLOAD in
 	litterbox)
 		log "uploading archive to litterbox.catbox.moe (kept 72 hours)"
 		archive_url=$(curl -fsS -m 300 -A "$UA" -F reqtype=fileupload -F time=72h \
-			-F "fileToUpload=@$ARCHIVE" \
+			-F "fileToUpload=@$ENC" \
 			https://litterbox.catbox.moe/resources/internals/api.php 2>"$T/err") ||
 			{ log "litterbox failed: $(cat "$T/err")"; archive_url=""; }
 		;;
 	0x0)
 		log "uploading archive to 0x0.st"
-		archive_url=$(curl -fsS -m 300 -A "$UA" -F "file=@$ARCHIVE" https://0x0.st 2>"$T/err") ||
+		archive_url=$(curl -fsS -m 300 -A "$UA" -F "file=@$ENC" https://0x0.st 2>"$T/err") ||
 			{ log "0x0.st failed: $(cat "$T/err")"; archive_url=""; }
 		;;
 	esac
 	case $archive_url in https://*) ;; *) archive_url="" ;; esac
 	if [ -n "$archive_url" ] && [ -n "${issue_api:-}" ]; then
-		jq -n --arg b "Full archive (temporary host): $archive_url" '{body: $b}' >"$T/c.json"
+		jq -n --arg b "Full archive (age-encrypted, temporary host): $archive_url" '{body: $b}' >"$T/c.json"
 		gh_api POST "${issue_api#https://api.github.com}/comments" "$T/c.json" >/dev/null
 	fi
 fi
@@ -120,7 +137,7 @@ if [ -n "$NTFY_TOPIC" ]; then
 	{
 		echo "${verdict:-no result}"
 		echo "${system:-unknown system}"
-		sed -n 's/^Chip: *//p' "$REPORT/summary.txt"
+		sed -n 's/^Chip: *//p' "$PUBLIC"
 		[ -n "$issue_url" ] && echo "Issue: $issue_url"
 		[ -n "$archive_url" ] && echo "Archive: $archive_url"
 	} >"$T/ntfy.txt"

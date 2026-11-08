@@ -1,5 +1,7 @@
 #!/bin/sh
-# summarize OUTDIR : print a short human-readable report to stdout.
+# summarize OUTDIR [public] : print a short human-readable report to stdout.
+# "public" omits the volunteer's free-text answers; that version is the only
+# one that leaves the machine unencrypted (GitHub issue body).
 # Also sets NUCLAB_VERDICT and NUCLAB_CHIP for the caller.
 
 oui_vendor() {
@@ -14,6 +16,7 @@ oui_vendor() {
 
 summarize() {
 	O=$1
+	MODE=${2:-full}
 	R=$O/raw
 	dmi() { sed -n "s/^$1=//p" "$R/dmi" 2>/dev/null; }
 
@@ -93,7 +96,7 @@ summarize() {
 	done
 	echo
 
-	if [ -s "$O/answers.txt" ]; then
+	if [ "$MODE" != public ] && [ -s "$O/answers.txt" ]; then
 		echo "Volunteer notes"
 		echo "---------------"
 		sed 's/^/  /' "$O/answers.txt"
