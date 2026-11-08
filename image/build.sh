@@ -37,18 +37,19 @@ EOF
 	echo "Created $here/local.conf. Add GITHUB_TOKEN there, then rebuild."
 fi
 
-version=$(git -C "$repo" describe --always --dirty 2>/dev/null || echo unknown)
+version=${NUCLAB_VERSION:-$(git -C "$repo" describe --always --dirty 2>/dev/null || echo unknown)}
 mkdir -p "$repo/out"
 
+variant=${NUCLAB_VARIANT:-survey}
 docker run --rm --platform linux/amd64 \
-	-e NUCLAB_VERSION="$version" \
+	-e NUCLAB_VERSION="$version" -e NUCLAB_VARIANT="$variant" \
 	-v "$repo:/src:ro" \
 	-v "$repo/out:/out" \
 	"alpine:$alpine_tag" /bin/sh /src/image/scripts/build-image.sh
 
 . "$here/local.conf"
 echo
-echo "Image:       $repo/out/nuclab-survey.img.gz"
+echo "Image:       $repo/out/nuclab-$variant.img.gz"
 if [ -n "${GITHUB_TOKEN:-}" ]; then
 	echo "GitHub:      issues in https://github.com/$GITHUB_REPO/issues"
 else

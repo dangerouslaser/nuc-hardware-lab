@@ -17,6 +17,14 @@ check "adaptor id: a8  OUI: 00-60-ad"
 check "System:        Intel Corporation NUC7i7BNH"
 check "EDID advertises Dolby Vision"
 check "log: Vendor: Mega Chips"
+# Display experiments: answers only in the private summary.
+mkdir -p /tmp/f/dvlab
+printf "step=1 name=C1 exp=avi frame=levels hz=24 extra=- rc=0 logo=n picture=? q3=7 odd=n note=\nstep=3 name=H1 exp=h1 frame=dv-ref hz=24 extra=- rc=0 logo=y picture=1 q3=- odd=n note=\n" >/tmp/f/dvlab/answers.txt
+summarize /tmp/f > /tmp/out.txt
+summarize /tmp/f public > /tmp/pub.txt
+check "name=H1 exp=h1 frame=dv-ref hz=24 extra=- rc=0 logo=y picture=1"
+grep -qF "ran: 2 steps" /tmp/pub.txt || { echo "FAIL: public dvlab line"; fail=1; }
+grep -qF "logo=y" /tmp/pub.txt && { echo "FAIL: answers leaked into public summary"; fail=1; }
 [ $fail = 0 ] && echo "PASS"
 exit $fail
 '

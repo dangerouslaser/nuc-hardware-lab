@@ -100,6 +100,19 @@ summarize() {
 	done
 	echo
 
+	if [ -d "$O/dvlab" ]; then
+		echo "Display experiments (Dolby Vision through the converter)"
+		echo "--------------------------------------------------------"
+		if [ "$MODE" = public ]; then
+			echo "  ran: $(grep -c '^step=' "$O/dvlab/answers.txt" 2>/dev/null || echo 0) steps (answers are in the encrypted report)"
+		elif [ -s "$O/dvlab/answers.txt" ]; then
+			sed 's/^/  /' "$O/dvlab/answers.txt"
+		else
+			sed -n 's/^lab: /  lab interface: /p' "$O/dvlab/env.txt" 2>/dev/null
+		fi
+		echo
+	fi
+
 	if [ "$MODE" != public ] && [ -s "$O/answers.txt" ]; then
 		echo "Volunteer notes"
 		echo "---------------"

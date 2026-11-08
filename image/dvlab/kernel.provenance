@@ -1,0 +1,4 @@
+SOURCE=libreelec-yblod 00d9aa1a72 (yblod-0.3.3 + docs), LibreELEC build tree build/linux-7.3
+LINUX=a90ee4305c4a5df72c11b31dacfdc76e00fcf78a
+LAB_PATCH=linux-9990-nuclab-lspcon-dv-lab.patch
+CONFIG=alpine:3.24 linux-lts 6.18.62-0-lts config + olddefconfig, LOCALVERSION=-nuclab-dvlab

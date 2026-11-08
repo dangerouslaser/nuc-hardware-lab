@@ -10,10 +10,11 @@ repo=$(cd "$(dirname "$0")/../.." && pwd)
 # Optional: NUCLAB_TEST_CONF=/path/to/nuclab.conf is copied onto the test
 # stick only (e.g. to try a GitHub token without baking it into the image).
 conf=${NUCLAB_TEST_CONF:-/dev/null}
-docker run --rm --platform linux/amd64 -v "$repo/out:/out" -v "$conf:/test.conf:ro" alpine:3.24 sh -euc '
+variant=${NUCLAB_VARIANT:-survey}
+docker run --rm --platform linux/amd64 -e V="$variant" -v "$repo/out:/out" -v "$conf:/test.conf:ro" alpine:3.24 sh -euc '
 apk add -q --no-progress qemu-system-x86_64 ovmf mtools >/dev/null
-cp /out/nuclab-survey.img /tmp/t.img
-mcopy -o -i /tmp/t.img@@1M /out/nuclab-serial-test.efi ::/EFI/BOOT/BOOTX64.EFI
+cp /out/nuclab-$V.img /tmp/t.img
+mcopy -o -i /tmp/t.img@@1M /out/nuclab-$V-serial-test.efi ::/EFI/BOOT/BOOTX64.EFI
 [ -s /test.conf ] && mcopy -o -i /tmp/t.img@@1M /test.conf ::/nuclab.conf
 cp /usr/share/ovmf/bios.bin /tmp/ovmf.bin 2>/dev/null || cp /usr/share/OVMF/OVMF.fd /tmp/ovmf.bin
 timeout 900 qemu-system-x86_64 -m 2048 -smp 2 -bios /tmp/ovmf.bin \
@@ -29,5 +30,11 @@ if grep -q NUCLAB-MODULE-FAIL "$log"; then
 	grep NUCLAB-MODULE "$log"; echo "SMOKE TEST: a required module failed to load"; exit 1
 fi
 grep -q "^Result: " "$log" || { echo "SMOKE TEST: no summary on screen"; exit 1; }
+if [ "$variant" = dvlab ]; then
+	# No Intel GPU in QEMU: dvlab.sh must run, find no lab interface and
+	# return to the survey without changing anything.
+	grep -q "display experiments are not available" "$log" ||
+		{ echo "SMOKE TEST: dvlab.sh did not run"; exit 1; }
+fi
 grep NUCLAB-MODULE-OK "$log"
 echo "SMOKE TEST: passed"

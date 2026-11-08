@@ -6,6 +6,19 @@ Written 2026-11-08 after the first successful volunteer survey. Read
 `PLAN.md` (Stage 3) in this repository first; this document replaces its
 open questions with what we now know and turns them into experiments.
 
+## Status (2026-11-08)
+
+- §6.1 done without a volunteer run: the C3's EDID is in report #6
+  (`raw/modetest`). The port's `dvbridge_parse_edid()` returns
+  `standard-dv`, VSVDB v2, `legacy_vsif=0`, 2160p60 capable.
+- §6.2 done: the wire encodings are written down in `image/dvlab/README.md`.
+  HDR10 on LSPCON is a DP InfoFrame SDP in the GMP DIP. The transcoder is in
+  DP mode, so every DIP's first dword goes out as an SDP header. H1b is
+  therefore redefined as an SDP header variant (HB2 = 0x1c), not as the
+  native-HDMI packet layout.
+- §5: the lab patch, `dvprobe`, the reference and negative frames and the
+  `dvlab` image variant are in `image/dvlab/` and `image/rootfs`.
+
 ## 1. What is now confirmed
 
 Source: volunteer report, `dangerouslaser/nuclab-reports` issue #6. Decrypt it

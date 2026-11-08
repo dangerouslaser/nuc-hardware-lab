@@ -8,15 +8,35 @@ OUT=/out
 W=/work
 ROOT=$W/rootfs
 VERSION=${NUCLAB_VERSION:-unknown}
+# survey (Alpine linux-lts) or dvlab (the LibreELEC-yblod kernel + the lab
+# patch, built by dvlab/build-kernel.sh, and the display experiments).
+VARIANT=${NUCLAB_VARIANT:-survey}
+DVLAB=/out/dvlab
+IMGNAME=nuclab-$VARIANT
 
 log() { printf '\n==> %s\n' "$*"; }
 
 log "Installing build tools and kernel"
-apk add -q --no-progress linux-lts linux-firmware-i915 linux-firmware-intel \
+apk add -q --no-progress linux-firmware-i915 linux-firmware-intel \
 	ukify systemd-efistub kmod cpio zstd dosfstools mtools sfdisk \
 	python3 binutils gzip >/dev/null
-
-KVER=$(basename /lib/modules/*-lts)
+if [ "$VARIANT" = dvlab ]; then
+	for f in nuclab-dvlab-kernel.tar.gz dv-ref.xrgb.zst dv-bad.xrgb.zst; do
+		[ -s "$DVLAB/$f" ] || { echo "missing $DVLAB/$f (see image/dvlab/README.md)" >&2; exit 1; }
+	done
+	mkdir -p /tmp/k && tar -C /tmp/k -xzf "$DVLAB/nuclab-dvlab-kernel.tar.gz"
+	KVER=$(cat /tmp/k/kernel.release)
+	rm -rf "/lib/modules/$KVER"; mkdir -p /lib/modules /boot
+	cp -a "/tmp/k/root/lib/modules/$KVER" /lib/modules/
+	cp /tmp/k/vmlinuz /boot/vmlinuz-dvlab
+	cp /tmp/k/System.map "/boot/System.map-$KVER"
+	VMLINUZ=/boot/vmlinuz-dvlab
+	apk add -q --no-progress build-base libdrm-dev pkgconf >/dev/null
+else
+	apk add -q --no-progress linux-lts >/dev/null
+	KVER=$(basename /lib/modules/*-lts)
+	VMLINUZ=/boot/vmlinuz-lts
+fi
 echo "kernel $KVER"
 
 log "Creating root filesystem"
@@ -26,8 +46,8 @@ cp /etc/apk/repositories "$ROOT/etc/apk/"
 apk add -q --no-progress --root "$ROOT" --initdb --no-scripts \
 	busybox busybox-binsh alpine-baselayout-data musl-utils \
 	kmod curl ca-certificates-bundle jq \
-	pciutils i2c-tools drm_info libdrm-tests libdisplay-info-tools \
-	wpa_supplicant age >/dev/null
+	pciutils i2c-tools drm_info libdrm libdrm-tests libdisplay-info-tools \
+	wpa_supplicant age zstd >/dev/null
 rm -rf "$ROOT/var/cache/apk"/* "$ROOT/etc/apk/keys"
 # Busybox applet links (scripts were skipped).
 chroot "$ROOT" /bin/busybox --install -s
@@ -120,17 +140,31 @@ mkdir -p "$ROOT/dev" "$ROOT/media/nuclab" "$ROOT/proc" "$ROOT/sys" "$ROOT/run" "
 mknod -m 600 "$ROOT/dev/console" c 5 1 2>/dev/null || true
 mknod -m 666 "$ROOT/dev/null" c 1 3 2>/dev/null || true
 chmod 0755 "$ROOT/init" "$ROOT/etc/init.d/rcS" "$ROOT/usr/sbin/"* "$ROOT/usr/lib/nuclab/"*.sh
+if [ "$VARIANT" = dvlab ]; then
+	gcc -O2 -Wall -Wextra -Werror -o "$ROOT/usr/bin/dvprobe" "$SRC/dvlab/dvprobe.c" \
+		$(pkg-config --cflags --libs libdrm)
+	strip "$ROOT/usr/bin/dvprobe"
+	mkdir -p "$ROOT/usr/share/nuclab"
+	cp "$DVLAB/dv-ref.xrgb.zst" "$DVLAB/dv-bad.xrgb.zst" "$ROOT/usr/share/nuclab/"
+	cp "$SRC/dvlab/frames.sha256" "$ROOT/usr/share/nuclab/"
+else
+	rm -f "$ROOT/usr/lib/nuclab/dvlab.sh"
+fi
 ln -sf /usr/share/zoneinfo/UTC "$ROOT/etc/localtime" 2>/dev/null || true
 {
 	echo "NUCLAB_VERSION=$VERSION"
 	echo "NUCLAB_BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 	echo "NUCLAB_ALPINE=$(cat /etc/alpine-release)"
 	echo "NUCLAB_KERNEL=$KVER"
+	echo "NUCLAB_VARIANT=$VARIANT"
+	if [ "$VARIANT" = dvlab ]; then
+		sed 's/^/NUCLAB_DVLAB_/' "$SRC/dvlab/kernel.provenance"
+	fi
 } >"$ROOT/etc/nuclab-release"
 cat >"$ROOT/etc/os-release" <<EOF
 NAME="NUC Display Lab"
 ID=nuclab
-PRETTY_NAME="NUC Display Lab survey $VERSION"
+PRETTY_NAME="NUC Display Lab $VARIANT $VERSION"
 VERSION_ID=$VERSION
 EOF
 # Public key(s) that report archives are encrypted to before upload.
@@ -149,25 +183,26 @@ ls -lh "$W/initramfs.zst"
 
 log "Building unified kernel image"
 CMDLINE="rdinit=/init console=tty1 quiet loglevel=3 fbcon=font:TER16x32 drm.debug=0x4 log_buf_len=64M"
-ukify build --linux "/boot/vmlinuz-lts" --initrd "$W/initramfs.zst" \
+[ "$VARIANT" = dvlab ] && CMDLINE="$CMDLINE i915.lspcon_dv_lab=1"
+ukify build --linux "$VMLINUZ" --initrd "$W/initramfs.zst" \
 	--cmdline "$CMDLINE" --uname "$KVER" --os-release "@$ROOT/etc/os-release" \
 	--output "$W/BOOTX64.EFI" >/dev/null
 # Second entry with a serial console, used by the QEMU smoke test.
-ukify build --linux "/boot/vmlinuz-lts" --initrd "$W/initramfs.zst" \
+ukify build --linux "$VMLINUZ" --initrd "$W/initramfs.zst" \
 	--cmdline "$CMDLINE console=ttyS0,115200 nuclab.test=1" --uname "$KVER" \
 	--output "$W/serial.efi" >/dev/null
 ls -lh "$W/BOOTX64.EFI"
 
 log "Writing disk image"
 FAT=$W/fat.img
-IMG=$OUT/nuclab-survey.img
+IMG=$OUT/$IMGNAME.img
 SIZE_MB=512
 rm -f "$FAT" "$IMG"
 truncate -s $((SIZE_MB - 2))M "$FAT"
 mkfs.vfat -F 32 -n NUCLAB "$FAT" >/dev/null
 mmd -i "$FAT" ::/EFI ::/EFI/BOOT ::/reports
 mcopy -i "$FAT" "$W/BOOTX64.EFI" ::/EFI/BOOT/BOOTX64.EFI
-cp "$W/serial.efi" "$OUT/nuclab-serial-test.efi"
+cp "$W/serial.efi" "$OUT/$IMGNAME-serial-test.efi"
 mcopy -i "$FAT" "$SRC/stick/README.txt" ::/README.txt
 mcopy -i "$FAT" "$SRC/stick/wifi.txt" ::/wifi.txt
 printf 'NUC Display Lab %s\r\n' "$VERSION" >"$W/VERSION.txt"

@@ -68,6 +68,23 @@ survey() {
 	ask a_path "2/3  Is the NUC's HDMI port plugged straight into the TV? If not, what is in between (receiver, switch, adapter)?"
 	ask a_more "3/3  Anything else? (TV input used, cable, problems seen):"
 
+	# Display experiments: lab images only, and only when chosen here.
+	want_dv=""
+	if [ -x /usr/lib/nuclab/dvlab.sh ] && grep -qw 'i915.lspcon_dv_lab=1' /proc/cmdline; then
+		if [ -n "$TEST" ]; then
+			want_dv=1
+		elif [ "${1:-}" = dv ]; then
+			want_dv=1
+		else
+			hr
+			echo "This stick can also run the Dolby Vision display experiments"
+			echo "(about 10 minutes; the TV switches picture modes several times"
+			echo "and you answer a few questions about what it shows)."
+			ask a_dv "Type D and press Enter to run them, or just press Enter to skip:"
+			case $a_dv in d|D) want_dv=1 ;; esac
+		fi
+	fi
+
 	ts=$(date -u +%Y%m%d-%H%M%S)
 	prod=$(cat /sys/class/dmi/id/product_name 2>/dev/null | tr -c 'A-Za-z0-9._-' '_' | cut -c1-24)
 	id="$ts-${prod:-unknown}-$(head -c 3 /dev/urandom | od -An -tx1 | tr -d ' \n')"
@@ -78,6 +95,11 @@ survey() {
 		echo "Connection: $a_path"
 		echo "Notes: $a_more"
 	} >"$R/answers.txt"
+
+	if [ -n "$want_dv" ]; then
+		/usr/lib/nuclab/dvlab.sh "$R/dvlab" 2>>"$LOG"
+		echo "dvlab exit $?" >>"$LOG"
+	fi
 
 	echo
 	say "Collecting display information (about 15 seconds)..."
@@ -156,12 +178,17 @@ if [ -n "$TEST" ]; then
 fi
 while true; do
 	echo
-	echo "Done. Thank you!   [P] power off   [R] run again   [S] shell"
+	if [ -x /usr/lib/nuclab/dvlab.sh ]; then
+		echo "Done. Thank you!   [P] power off   [R] run again   [D] display experiments   [S] shell"
+	else
+		echo "Done. Thank you!   [P] power off   [R] run again   [S] shell"
+	fi
 	printf '> '
 	IFS= read -r k
 	case $k in
 	p|P|"") sync; umount "$STICK" 2>/dev/null; poweroff ;;
 	r|R) survey; hr ;;
+	d|D) [ -x /usr/lib/nuclab/dvlab.sh ] && { survey dv; hr; } ;;
 	s|S) /bin/sh ;;
 	esac
 done

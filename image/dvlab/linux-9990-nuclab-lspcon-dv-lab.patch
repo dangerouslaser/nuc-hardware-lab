@@ -1,0 +1,576 @@
+diff --git a/drivers/gpu/drm/i915/display/intel_ddi.c b/drivers/gpu/drm/i915/display/intel_ddi.c
+index 7cd3b5dad..e5e9655eb 100644
+--- a/drivers/gpu/drm/i915/display/intel_ddi.c
++++ b/drivers/gpu/drm/i915/display/intel_ddi.c
+@@ -3640,6 +3640,15 @@ static void intel_ddi_update_pipe_dp(struct intel_atomic_state *state,
+ 
+ 	intel_dp_set_infoframes(encoder, true, crtc_state, conn_state);
+ 
++	/* NUC Display Lab: a fastset also ends an LSPCON DV lab experiment
++	 * (restores the driver's AVI and clears the lab mode). */
++	if (enc_to_dig_port(encoder)->lspcon.dv_lab_mode &&
++	    intel_lspcon_active(enc_to_dig_port(encoder)) &&
++	    intel_dp_has_hdmi_sink(&enc_to_dig_port(encoder)->dp))
++		enc_to_dig_port(encoder)->set_infoframes(encoder,
++							 crtc_state->has_infoframe,
++							 crtc_state, conn_state);
++
+ 	intel_backlight_update(state, encoder, crtc_state, conn_state);
+ 	drm_connector_update_privacy_screen(conn_state);
+ }
+diff --git a/drivers/gpu/drm/i915/display/intel_display_debugfs.c b/drivers/gpu/drm/i915/display/intel_display_debugfs.c
+index 3f02868ef..70ba8eecc 100644
+--- a/drivers/gpu/drm/i915/display/intel_display_debugfs.c
++++ b/drivers/gpu/drm/i915/display/intel_display_debugfs.c
+@@ -44,6 +44,7 @@
+ #include "intel_hdmi.h"
+ #include "intel_hotplug.h"
+ #include "intel_link_bw.h"
++#include "intel_lspcon.h"
+ #include "intel_panel.h"
+ #include "intel_pps.h"
+ #include "intel_psr.h"
+@@ -1376,6 +1377,9 @@ void intel_connector_debugfs_add(struct intel_connector *connector)
+ 	    connector_type == DRM_MODE_CONNECTOR_HDMIB)
+ 		debugfs_create_file("i915_lpsp_capability", 0444, root,
+ 				    connector, &i915_lpsp_capability_fops);
++
++	if (connector_type == DRM_MODE_CONNECTOR_DisplayPort)
++		intel_lspcon_dv_lab_debugfs_add(connector);
+ }
+ 
+ /**
+diff --git a/drivers/gpu/drm/i915/display/intel_display_params.c b/drivers/gpu/drm/i915/display/intel_display_params.c
+index 60b1c25cb..8e2ec535a 100644
+--- a/drivers/gpu/drm/i915/display/intel_display_params.c
++++ b/drivers/gpu/drm/i915/display/intel_display_params.c
+@@ -40,6 +40,10 @@ intel_display_param_named_unsafe(enable_dv_lab, bool, 0400,
+ 	"Experimental Standard-DV RGB8 tunnel lab, Lunar Lake only (default: off). "
+ 	"Requires independently validated packed pixels and HDMI frame metadata.");
+ 
++intel_display_param_named_unsafe(lspcon_dv_lab, bool, 0400,
++	"NUC Display Lab: LSPCON Dolby Vision signalling experiments via debugfs "
++	"(default: off). Lab images only; never enable in a release.");
++
+ intel_display_param_named_unsafe(vbt_firmware, charp, 0400,
+ 	"Load VBT from specified file under /lib/firmware");
+ 
+diff --git a/drivers/gpu/drm/i915/display/intel_display_params.h b/drivers/gpu/drm/i915/display/intel_display_params.h
+index 5e422975a..daff1f0c1 100644
+--- a/drivers/gpu/drm/i915/display/intel_display_params.h
++++ b/drivers/gpu/drm/i915/display/intel_display_params.h
+@@ -24,6 +24,7 @@ struct drm_printer;
+  */
+ #define INTEL_DISPLAY_PARAMS_FOR_EACH(param) \
+ 	param(bool, enable_dv_lab, true, 0) \
++	param(bool, lspcon_dv_lab, false, 0) \
+ 	param(char *, dmc_firmware_path, NULL, 0400) \
+ 	param(char *, vbt_firmware, NULL, 0400) \
+ 	param(int, lvds_channel_mode, 0, 0400) \
+diff --git a/drivers/gpu/drm/i915/display/intel_display_types.h b/drivers/gpu/drm/i915/display/intel_display_types.h
+index b89458f5e..6928e35e4 100644
+--- a/drivers/gpu/drm/i915/display/intel_display_types.h
++++ b/drivers/gpu/drm/i915/display/intel_display_types.h
+@@ -2001,6 +2001,10 @@ struct intel_lspcon {
+ 	bool hdr_supported;
+ 	enum drm_lspcon_mode mode;
+ 	enum lspcon_vendor vendor;
++	/* NUC Display Lab only: active DV signalling experiment (0 = off). */
++	u8 dv_lab_mode;
++	u8 dv_lab_crc[6];
++	int dv_lab_crc_status;
+ };
+ 
+ struct intel_digital_port {
+diff --git a/drivers/gpu/drm/i915/display/intel_lspcon.c b/drivers/gpu/drm/i915/display/intel_lspcon.c
+index 9ceabbc98..a32b34f28 100644
+--- a/drivers/gpu/drm/i915/display/intel_lspcon.c
++++ b/drivers/gpu/drm/i915/display/intel_lspcon.c
+@@ -23,7 +23,9 @@
+  *
+  */
+ 
++#include <linux/debugfs.h>
+ #include <linux/iopoll.h>
++#include <linux/seq_file.h>
+ 
+ #include <drm/display/drm_dp_dual_mode_helper.h>
+ #include <drm/display/drm_hdmi_helper.h>
+@@ -31,6 +33,7 @@
+ #include <drm/drm_edid.h>
+ #include <drm/drm_print.h>
+ 
++#include "intel_bios.h"
+ #include "intel_de.h"
+ #include "intel_display_regs.h"
+ #include "intel_display_types.h"
+@@ -38,6 +41,7 @@
+ #include "intel_dp.h"
+ #include "intel_hdmi.h"
+ #include "intel_lspcon.h"
++#include "intel_dv_lab_policy.h"
+ 
+ /* LSPCON OUI Vendor ID(signatures) */
+ #define LSPCON_VENDOR_PARADE_OUI 0x001CF8
+@@ -554,6 +558,11 @@ void lspcon_set_infoframes(struct intel_encoder *encoder,
+ 		return;
+ 	}
+ 
++	/* A modeset (or fastset, see intel_ddi_update_pipe_dp()) ends any DV
++	 * lab experiment; intel_dp_set_infoframes() rewrites the DIPs from
++	 * crtc_state in the same commit. */
++	lspcon->dv_lab_mode = 0;
++
+ 	/* FIXME precompute infoframes */
+ 
+ 	ret = drm_hdmi_avi_infoframe_from_display_mode(&frame.avi,
+@@ -703,6 +712,7 @@ bool intel_lspcon_init(struct intel_digital_port *dig_port)
+ 
+ 	connector->ycbcr_420_allowed = true;
+ 	lspcon->active = true;
++	lspcon->dv_lab_crc_status = -ENODATA;
+ 	drm_dbg_kms(display->drm, "Success: LSPCON init\n");
+ 	return true;
+ }
+@@ -754,3 +764,421 @@ void intel_lspcon_resume(struct intel_digital_port *dig_port)
+ 	else
+ 		drm_dbg_kms(display->drm, "LSPCON resume success\n");
+ }
++
++/*
++ * NUC Display Lab: LSPCON Dolby Vision signalling experiments.
++ * NOT FOR RELEASE. Only built into the lab image, and only active with
++ * i915.lspcon_dv_lab=1. Nothing here writes DPCD outside the MegaChips AVI
++ * mailbox (0x5C0-0x5DF) the driver already uses, except DP_TEST_SINK (0x270)
++ * for the standard sink CRC, and only when the branch advertises
++ * DP_TEST_CRC_SUPPORTED. Every other change is a GPU DIP register write.
++ *
++ * Write one command to <connector>/i915_lspcon_dv_lab:
++ *   off  restore the driver's own AVI and DIP state
++ *   avi  DV-style AVI (RGB, full range, CTA VIC, no colorimetry), no VSIF
++ *   h1   avi + Dolby VSIF in the VS DIP, DP InfoFrame SDP form (as GMP/HDR)
++ *   h1b  as h1, but HB2 = exact data byte count - 1 (0x1c: version,
++ *        length and 27 payload bytes) instead of the HDR path's 0x1d
++ *   h2   avi + Dolby VSIF in the GMP DIP, DP InfoFrame SDP form
++ *   crc  sample the branch's DP RX CRC (DP_TEST_SINK) once
++ * Any modeset ends the experiment. Reading the file dumps the state.
++ */
++enum {
++	LSPCON_DV_LAB_OFF, LSPCON_DV_LAB_AVI, LSPCON_DV_LAB_H1,
++	LSPCON_DV_LAB_H1B, LSPCON_DV_LAB_H2, LSPCON_DV_LAB_CRC,
++};
++
++static const char * const lspcon_dv_lab_names[] = {
++	"off", "avi", "h1", "h1b", "h2", "crc",
++};
++
++static int lspcon_dv_lab_avi(const struct intel_crtc_state *crtc_state,
++			     const struct drm_connector_state *conn_state,
++			     u8 *buf, size_t size)
++{
++	const struct drm_display_mode *mode = &crtc_state->hw.adjusted_mode;
++	union hdmi_infoframe frame;
++	int ret;
++
++	ret = drm_hdmi_avi_infoframe_from_display_mode(&frame.avi,
++						       conn_state->connector, mode);
++	if (ret)
++		return ret;
++	/* The same overrides as the native-HDMI DV path (linux-9900-07). */
++	frame.avi.video_code = intel_dv_lab_avi_vic(drm_match_cea_mode(mode));
++	if (!frame.avi.video_code)
++		return -EINVAL;
++	frame.avi.colorspace = HDMI_COLORSPACE_RGB;
++	frame.avi.colorimetry = HDMI_COLORIMETRY_NONE;
++	frame.avi.extended_colorimetry = 0;
++	frame.avi.quantization_range = HDMI_QUANTIZATION_RANGE_FULL;
++	drm_hdmi_avi_infoframe_content_type(&frame.avi, conn_state);
++	ret = hdmi_avi_infoframe_check(&frame.avi);
++	if (ret)
++		return ret;
++	return hdmi_infoframe_pack(&frame, buf, size);
++}
++
++/* Standard-DV VSIF exactly as the native-HDMI path builds it: signal=1. */
++static int lspcon_dv_lab_vsif(u8 *hdmi, size_t size)
++{
++	struct hdmi_dolby_vendor_infoframe dv;
++
++	hdmi_dolby_vendor_infoframe_init(&dv);
++	dv.signal = true;
++	if (hdmi_dolby_vendor_infoframe_check(&dv))
++		return -EINVAL;
++	return hdmi_dolby_vendor_infoframe_pack(&dv, hdmi, size);
++}
++
++/*
++ * DP 1.4 InfoFrame SDP, byte for byte the layout
++ * intel_dp_hdr_metadata_infoframe_sdp_pack() puts in the GMP DIP for HDR10,
++ * which this converter demonstrably turns into an HDMI DRM InfoFrame.
++ * Gen9 DIPs are 32 bytes, so PB27 does not fit; it is reserved (zero) in
++ * the Dolby VSIF, which the caller checks.
++ */
++static int lspcon_dv_lab_sdp(const u8 *hdmi, int len, u8 *sdp, u8 hb2)
++{
++	if (len != HDMI_INFOFRAME_HEADER_SIZE + 27 || hdmi[3 + 27] != 0)
++		return -EINVAL;
++	memset(sdp, 0, VIDEO_DIP_DATA_SIZE);
++	sdp[0] = 0;		/* HB0: secondary-data packet ID */
++	sdp[1] = hdmi[0];	/* HB1: 0x80 + InfoFrame type = 0x81 */
++	sdp[2] = hb2;		/* HB2: 0x1d as the HDR path, or 0x1c */
++	sdp[3] = 0x13 << 2;	/* HB3: InfoFrame SDP version 1.3 */
++	sdp[4] = hdmi[1];	/* DB0: InfoFrame version */
++	sdp[5] = hdmi[2];	/* DB1: InfoFrame length (27) */
++	memcpy(&sdp[6], &hdmi[HDMI_INFOFRAME_HEADER_SIZE], VIDEO_DIP_DATA_SIZE - 6);
++	return VIDEO_DIP_DATA_SIZE;
++}
++
++static int lspcon_dv_lab_sink_crc(struct intel_dp *intel_dp, u8 crc[6])
++{
++	struct drm_dp_aux *aux = &intel_dp->aux;
++	u8 misc, start, sink;
++	int i, ret;
++
++	ret = drm_dp_dpcd_read_byte(aux, DP_TEST_SINK_MISC, &misc);
++	if (ret)
++		return ret;
++	if (!(misc & DP_TEST_CRC_SUPPORTED))
++		return -EOPNOTSUPP;
++	ret = drm_dp_dpcd_read_byte(aux, DP_TEST_SINK, &sink);
++	if (ret)
++		return ret;
++	ret = drm_dp_dpcd_write_byte(aux, DP_TEST_SINK, sink | DP_TEST_SINK_START);
++	if (ret)
++		return ret;
++	/* The count restarts asynchronously after START; take the baseline
++	 * one frame later. */
++	msleep(50);
++	ret = drm_dp_dpcd_read_byte(aux, DP_TEST_SINK_MISC, &misc);
++	if (ret)
++		goto stop;
++	start = misc & DP_TEST_COUNT_MASK;
++	ret = -ETIMEDOUT;
++	/* At least two new frames: the first may be partial. */
++	for (i = 0; i < 40; i++) {
++		msleep(25);
++		if (drm_dp_dpcd_read_byte(aux, DP_TEST_SINK_MISC, &misc))
++			break;
++		if (((misc - start) & DP_TEST_COUNT_MASK) >= 2) {
++			ret = drm_dp_dpcd_read_data(aux, DP_TEST_CRC_R_CR, crc, 6);
++			break;
++		}
++	}
++stop:
++	drm_dp_dpcd_write_byte(aux, DP_TEST_SINK, sink & ~DP_TEST_SINK_START);
++	return ret;
++}
++
++static int lspcon_dv_lab_apply(struct intel_connector *connector,
++			       const struct intel_crtc_state *crtc_state,
++			       int cmd)
++{
++	struct intel_display *display = to_intel_display(connector);
++	struct intel_encoder *encoder = intel_attached_encoder(connector);
++	struct intel_digital_port *dig_port = enc_to_dig_port(encoder);
++	struct intel_lspcon *lspcon = &dig_port->lspcon;
++	struct intel_dp *intel_dp = &dig_port->dp;
++	const struct drm_connector_state *conn_state = connector->base.state;
++	enum transcoder trans = crtc_state->cpu_transcoder;
++	u8 avi[VIDEO_DIP_DATA_SIZE] = {}, hdmi[VIDEO_DIP_DATA_SIZE] = {};
++	u8 sdp[VIDEO_DIP_DATA_SIZE] = {}, sdp2[VIDEO_DIP_DATA_SIZE] = {};
++	int avi_len, len;
++	u32 val;
++
++	if (cmd == LSPCON_DV_LAB_CRC) {
++		lspcon->dv_lab_crc_status =
++			lspcon_dv_lab_sink_crc(intel_dp, lspcon->dv_lab_crc);
++		return 0;
++	}
++
++	if (cmd == LSPCON_DV_LAB_OFF) {
++		/* Exactly what the enable path does. */
++		intel_dp_set_infoframes(encoder, true, crtc_state, conn_state);
++		lspcon_set_infoframes(encoder, true, crtc_state, conn_state);
++		drm_info(display->drm, "LSPCON DV lab: off, driver state restored\n");
++		return 0;
++	}
++
++	avi_len = lspcon_dv_lab_avi(crtc_state, conn_state, avi, sizeof(avi));
++	if (avi_len < 0)
++		return avi_len;
++	len = lspcon_dv_lab_vsif(hdmi, sizeof(hdmi));
++	if (len < 0)
++		return len;
++	/* The transcoder is in DP mode on an LSPCON port: DW0 of a DIP is
++	 * always sent as the SDP header, so only SDP forms make sense. */
++	if (lspcon_dv_lab_sdp(hdmi, len, sdp, 0x1d) < 0 ||
++	    lspcon_dv_lab_sdp(hdmi, len, sdp2, 0x1c) < 0)
++		return -EINVAL;
++
++	/* AVI first: if the mailbox write fails, nothing else has changed. */
++	if (!_lspcon_write_avi_infoframe_mca(&intel_dp->aux, avi, avi_len)) {
++		drm_err(display->drm, "LSPCON DV lab: AVI write failed\n");
++		return -EIO;
++	}
++	lspcon->dv_lab_mode = cmd;
++
++	/* Then a known DIP state: no VS, no GMP. */
++	val = intel_de_read(display, HSW_TVIDEO_DIP_CTL(display, trans));
++	val &= ~(VIDEO_DIP_ENABLE_VS_HSW | VIDEO_DIP_ENABLE_GMP_HSW);
++	intel_de_write(display, HSW_TVIDEO_DIP_CTL(display, trans), val);
++	intel_de_posting_read(display, HSW_TVIDEO_DIP_CTL(display, trans));
++
++	switch (cmd) {
++	case LSPCON_DV_LAB_H1:
++		hsw_write_infoframe(encoder, crtc_state, HDMI_INFOFRAME_TYPE_VENDOR,
++				    sdp, sizeof(sdp));
++		break;
++	case LSPCON_DV_LAB_H1B:
++		hsw_write_infoframe(encoder, crtc_state, HDMI_INFOFRAME_TYPE_VENDOR,
++				    sdp2, sizeof(sdp2));
++		break;
++	case LSPCON_DV_LAB_H2:
++		hsw_write_infoframe(encoder, crtc_state, HDMI_PACKET_TYPE_GAMUT_METADATA,
++				    sdp, sizeof(sdp));
++		break;
++	}
++	drm_info(display->drm, "LSPCON DV lab: %s AVI %*ph\n",
++		 lspcon_dv_lab_names[cmd], avi_len, avi);
++	if (cmd == LSPCON_DV_LAB_H1B)
++		drm_info(display->drm, "LSPCON DV lab: VS DIP %*ph\n",
++			 (int)sizeof(sdp2), sdp2);
++	else if (cmd != LSPCON_DV_LAB_AVI)
++		drm_info(display->drm, "LSPCON DV lab: %s DIP %*ph\n",
++			 cmd == LSPCON_DV_LAB_H2 ? "GMP" : "VS",
++			 (int)sizeof(sdp), sdp);
++	return 0;
++}
++
++/* Lock connection_mutex and the connector's CRTC; run fn with the state. */
++static int lspcon_dv_lab_locked(struct intel_connector *connector,
++				int (*fn)(struct intel_connector *,
++					  const struct intel_crtc_state *, int,
++					  struct seq_file *),
++				int cmd, struct seq_file *m)
++{
++	struct intel_display *display = to_intel_display(connector);
++	struct drm_modeset_acquire_ctx ctx;
++	struct drm_crtc *crtc;
++	int ret;
++
++	drm_modeset_acquire_init(&ctx, DRM_MODESET_ACQUIRE_INTERRUPTIBLE);
++retry:
++	ret = drm_modeset_lock(&display->drm->mode_config.connection_mutex, &ctx);
++	if (ret)
++		goto out;
++	crtc = connector->base.state->crtc;
++	if (connector->base.status != connector_status_connected || !crtc) {
++		ret = -ENODEV;
++		goto out;
++	}
++	ret = drm_modeset_lock(&crtc->mutex, &ctx);
++	if (ret)
++		goto out;
++	/* A nonblocking commit may still be programming the hardware. */
++	if (connector->base.state->commit &&
++	    !wait_for_completion_timeout(&connector->base.state->commit->hw_done,
++					 msecs_to_jiffies(5000))) {
++		ret = -EBUSY;
++		goto out;
++	}
++	ret = fn(connector, to_intel_crtc_state(crtc->state), cmd, m);
++out:
++	if (ret == -EDEADLK) {
++		ret = drm_modeset_backoff(&ctx);
++		if (!ret)
++			goto retry;
++	}
++	drm_modeset_drop_locks(&ctx);
++	drm_modeset_acquire_fini(&ctx);
++	return ret;
++}
++
++static int lspcon_dv_lab_check(struct intel_connector *connector,
++			       const struct intel_crtc_state *crtc_state)
++{
++	struct intel_digital_port *dig_port = intel_attached_dig_port(connector);
++
++	if (!dig_port || !dig_port->lspcon.active ||
++	    dig_port->lspcon.vendor != LSPCON_VENDOR_MCA)
++		return -ENODEV;
++	if (!crtc_state->hw.active || !intel_dp_has_hdmi_sink(&dig_port->dp))
++		return -ENODEV;
++	/* The DV AVI says RGB full range: the pipe must be sending that. */
++	if (crtc_state->output_format != INTEL_OUTPUT_FORMAT_RGB ||
++	    crtc_state->limited_color_range)
++		return -EINVAL;
++	if (DISPLAY_VER(to_intel_display(connector)) >= 11)
++		return -ENODEV;	/* gen9/10 DIP layout only */
++	return 0;
++}
++
++static int lspcon_dv_lab_do_write(struct intel_connector *connector,
++				  const struct intel_crtc_state *crtc_state,
++				  int cmd, struct seq_file *m)
++{
++	int ret = lspcon_dv_lab_check(connector, crtc_state);
++
++	/* off and crc are always safe on an active MCA LSPCON pipe. */
++	if (ret == -EINVAL && (cmd == LSPCON_DV_LAB_OFF || cmd == LSPCON_DV_LAB_CRC))
++		ret = 0;
++	return ret ? ret : lspcon_dv_lab_apply(connector, crtc_state, cmd);
++}
++
++static int lspcon_dv_lab_do_show(struct intel_connector *connector,
++				 const struct intel_crtc_state *crtc_state,
++				 int cmd, struct seq_file *m)
++{
++	struct intel_display *display = to_intel_display(connector);
++	struct intel_encoder *encoder = intel_attached_encoder(connector);
++	struct intel_digital_port *dig_port = enc_to_dig_port(encoder);
++	struct intel_lspcon *lspcon = &dig_port->lspcon;
++	struct intel_dp *intel_dp = &dig_port->dp;
++	const struct drm_display_mode *mode = &crtc_state->hw.adjusted_mode;
++	enum transcoder trans = crtc_state->cpu_transcoder;
++	u8 buf[VIDEO_DIP_DATA_SIZE];
++	int ret = lspcon_dv_lab_check(connector, crtc_state);
++
++	seq_printf(m, "check: %d\n", ret);
++	seq_printf(m, "mode: %s\n", lspcon_dv_lab_names[lspcon->dv_lab_mode]);
++	seq_printf(m, "lspcon: active=%d vendor=%s hdr=%d pcon=%d\n",
++		   lspcon->active,
++		   lspcon->vendor == LSPCON_VENDOR_MCA ? "mca" : "parade",
++		   lspcon->hdr_supported, lspcon->mode == DRM_LSPCON_MODE_PCON);
++	seq_printf(m, "branch: oui %3phD dev-id %.6s hw %d.%d sw %d.%d\n",
++		   intel_dp->desc.ident.oui, intel_dp->desc.ident.device_id,
++		   intel_dp->desc.ident.hw_rev >> 4, intel_dp->desc.ident.hw_rev & 0xf,
++		   intel_dp->desc.ident.sw_major_rev, intel_dp->desc.ident.sw_minor_rev);
++	if (ret == -ENODEV)
++		return 0;
++	seq_printf(m, "timing: " DRM_MODE_FMT " vic %u\n", DRM_MODE_ARG(mode),
++		   drm_match_cea_mode(mode));
++	seq_printf(m, "pipe: transcoder %d output_format %d pipe_bpp %d limited %d dither %d infoframes 0x%x\n",
++		   trans, crtc_state->output_format, crtc_state->pipe_bpp,
++		   crtc_state->limited_color_range, crtc_state->dither,
++		   crtc_state->infoframes.enable);
++	seq_printf(m, "dip_ctl: 0x%08x\n",
++		   intel_de_read(display, HSW_TVIDEO_DIP_CTL(display, trans)));
++	hsw_read_infoframe(encoder, crtc_state, HDMI_INFOFRAME_TYPE_VENDOR, buf, sizeof(buf));
++	seq_printf(m, "vs_dip: %*ph\n", (int)sizeof(buf), buf);
++	hsw_read_infoframe(encoder, crtc_state, HDMI_PACKET_TYPE_GAMUT_METADATA, buf, sizeof(buf));
++	seq_printf(m, "gmp_dip: %*ph\n", (int)sizeof(buf), buf);
++	if (drm_dp_dpcd_read_byte(&intel_dp->aux, DP_TEST_SINK_MISC, buf) == 0)
++		seq_printf(m, "test_sink_misc: 0x%02x crc_supported %d\n", buf[0],
++			   !!(buf[0] & DP_TEST_CRC_SUPPORTED));
++	seq_printf(m, "sink_crc: status %d r %02x%02x g %02x%02x b %02x%02x\n",
++		   lspcon->dv_lab_crc_status,
++		   lspcon->dv_lab_crc[1], lspcon->dv_lab_crc[0],
++		   lspcon->dv_lab_crc[3], lspcon->dv_lab_crc[2],
++		   lspcon->dv_lab_crc[5], lspcon->dv_lab_crc[4]);
++	return 0;
++}
++
++static int lspcon_dv_lab_show(struct seq_file *m, void *data)
++{
++	return lspcon_dv_lab_locked(m->private, lspcon_dv_lab_do_show, 0, m);
++}
++
++static int lspcon_dv_lab_open(struct inode *inode, struct file *file)
++{
++	return single_open(file, lspcon_dv_lab_show, inode->i_private);
++}
++
++static ssize_t lspcon_dv_lab_write(struct file *file, const char __user *ubuf,
++				   size_t len, loff_t *offp)
++{
++	struct intel_connector *connector =
++		((struct seq_file *)file->private_data)->private;
++	char cmd[8] = {};
++	int i, ret;
++
++	if (len >= sizeof(cmd))
++		return -EINVAL;
++	if (copy_from_user(cmd, ubuf, len))
++		return -EFAULT;
++	strim(cmd);
++	for (i = 0; i < ARRAY_SIZE(lspcon_dv_lab_names); i++)
++		if (!strcmp(cmd, lspcon_dv_lab_names[i]))
++			break;
++	if (i == ARRAY_SIZE(lspcon_dv_lab_names))
++		return -EINVAL;
++	ret = lspcon_dv_lab_locked(connector, lspcon_dv_lab_do_write, i, NULL);
++	return ret ? ret : len;
++}
++
++static const struct file_operations lspcon_dv_lab_fops = {
++	.owner = THIS_MODULE,
++	.open = lspcon_dv_lab_open,
++	.read = seq_read,
++	.llseek = seq_lseek,
++	.release = single_release,
++	.write = lspcon_dv_lab_write,
++};
++
++/* Read-only dump of the two vendor DPCD ranges (plan H3). Read once. */
++static int lspcon_dv_lab_do_dpcd(struct intel_connector *connector,
++				 const struct intel_crtc_state *crtc_state,
++				 int cmd, struct seq_file *m)
++{
++	struct intel_dp *intel_dp = intel_attached_dp(connector);
++	static const unsigned int ranges[] = { 0x00500, 0x70000 };
++	u8 buf[16];
++	int r, off;
++
++	for (r = 0; r < ARRAY_SIZE(ranges); r++)
++		for (off = 0; off < 0x100; off += 16) {
++			int ret = drm_dp_dpcd_read_data(&intel_dp->aux,
++							ranges[r] + off, buf, 16);
++			if (ret)
++				seq_printf(m, "%05x: error %d\n", ranges[r] + off, ret);
++			else
++				seq_printf(m, "%05x: %16ph\n", ranges[r] + off, buf);
++		}
++	return 0;
++}
++
++static int lspcon_dv_lab_dpcd_show(struct seq_file *m, void *data)
++{
++	return lspcon_dv_lab_locked(m->private, lspcon_dv_lab_do_dpcd, 0, m);
++}
++DEFINE_SHOW_ATTRIBUTE(lspcon_dv_lab_dpcd);
++
++void intel_lspcon_dv_lab_debugfs_add(struct intel_connector *connector)
++{
++	struct intel_display *display = to_intel_display(connector);
++	struct intel_encoder *encoder = intel_attached_encoder(connector);
++
++	if (!display->params.lspcon_dv_lab || !encoder ||
++	    !intel_bios_encoder_is_lspcon(encoder->devdata))
++		return;
++	debugfs_create_file("i915_lspcon_dv_lab", 0600,
++			    connector->base.debugfs_entry, connector,
++			    &lspcon_dv_lab_fops);
++	debugfs_create_file("i915_lspcon_dv_lab_dpcd", 0400,
++			    connector->base.debugfs_entry, connector,
++			    &lspcon_dv_lab_dpcd_fops);
++}
+diff --git a/drivers/gpu/drm/i915/display/intel_lspcon.h b/drivers/gpu/drm/i915/display/intel_lspcon.h
+index 41d142a5c..5964f035f 100644
+--- a/drivers/gpu/drm/i915/display/intel_lspcon.h
++++ b/drivers/gpu/drm/i915/display/intel_lspcon.h
+@@ -9,6 +9,7 @@
+ #include <linux/types.h>
+ 
+ struct drm_connector_state;
++struct intel_connector;
+ struct intel_crtc_state;
+ struct intel_digital_port;
+ struct intel_encoder;
+@@ -18,6 +19,7 @@ bool intel_lspcon_active(struct intel_digital_port *dig_port);
+ bool intel_lspcon_detect_hdr_capability(struct intel_digital_port *dig_port);
+ void intel_lspcon_resume(struct intel_digital_port *dig_port);
+ void intel_lspcon_wait_pcon_mode(struct intel_digital_port *dig_port);
++void intel_lspcon_dv_lab_debugfs_add(struct intel_connector *connector);
+ u32 intel_lspcon_infoframes_enabled(struct intel_encoder *encoder,
+ 				    const struct intel_crtc_state *pipe_config);
+ 
