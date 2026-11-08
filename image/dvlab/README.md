@@ -58,6 +58,36 @@ On gen9 every HSW-style DIP data buffer is 32 bytes. DW0 is
 The VSIF is `hdmi_dolby_vendor_infoframe_init()` with `signal = 1`, the same
 packet the native-HDMI DV path sends.
 
+## v0.3.0: level-shifter mode (NUC7) and DP-to-HDMI converters (gen11+)
+
+v0.2.0 (reports #8, #9) showed that the NUC7's MCDP2800 FW 1.77 forwards the
+HDR10 SDP but drops the Dolby VSIF. v0.3.0 adds two routes; `dvlab.sh` picks
+one from the `route:` line of the lab debugfs file.
+
+- **mca (NUC7, woodenalbatross): level-shifter round.**
+  - `i915.lspcon_ls_lab=1|2` plus an i915 unbind/bind treats port B as plain
+    DP++. The MCDP2800 is put into LS mode through the standard dual-mode
+    register (I2C 0x40, offset 0x40), and the TV is driven as HDMI-A-1 with
+    the GPU's own AVI and Dolby VSIF (the native-HDMI DV path, allowed on gen9
+    for this port only).
+  - Limit: 4K up to 30 Hz (adaptor 340 MHz, gen9 HDMI 300 MHz, 4K23.976 RGB8 =
+    297 MHz). There is no HDR10 in LS mode, because gen9 has no DRM InfoFrame
+    DIP.
+  - Steps: levels, DV reference, negative, then back to PCON.
+  - Mode 1 reads the EDID over GMBUS; mode 2 reads it over the LSPCON's
+    I2C-over-AUX. Dual-mode registers always go over AUX.
+- **pcon (gen11+ DP-to-HDMI protocol converter, e.g. Silberbak's INUC 11):**
+  the v0.2.0 steps (C1, C2, H1, H1b, H2, negative, C1 again), with the DV AVI
+  sent as an InfoFrame SDP (`00 82 1d 4c 02 0d ...`) in the transcoder's AVI
+  DIP, because there is no vendor mailbox.
+  - Reading the results: only the GMP DIP is known to reach the wire in DP
+    mode (it is the HDR10 path). If C1, H1 and H1b do nothing but H2 works,
+    suspect the AVI/VS DIPs before the converter. The C1 levels count is the
+    only direct check that the AVI arrived.
+
+The lab image also boots with `i915.qms=0`: the yblod QMS VTEM is 36 bytes,
+and the gen9 GMP DIP is 32.
+
 ## The LG C3's EDID (plan section 6.1)
 
 The EDID was already in the first report (`raw/modetest`, connector DP-1, 256

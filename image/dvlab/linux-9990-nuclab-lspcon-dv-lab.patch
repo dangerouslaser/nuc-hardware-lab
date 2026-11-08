@@ -1,14 +1,77 @@
+diff --git a/drivers/gpu/drm/i915/display/intel_bios.c b/drivers/gpu/drm/i915/display/intel_bios.c
+index 97cbae2e5..4dba1bd6a 100644
+--- a/drivers/gpu/drm/i915/display/intel_bios.c
++++ b/drivers/gpu/drm/i915/display/intel_bios.c
+@@ -2683,10 +2683,28 @@ intel_bios_encoder_supports_dsi(const struct intel_bios_encoder_data *devdata)
+ 
+ bool
+ intel_bios_encoder_is_lspcon(const struct intel_bios_encoder_data *devdata)
++{
++	/* NUC Display Lab: with lspcon_ls_lab the port is treated as plain DP++
++	 * (DP and HDMI connectors) and the LSPCON stays in level-shifter mode. */
++	return intel_bios_encoder_lspcon_vbt(devdata) &&
++		!devdata->display->params.lspcon_ls_lab;
++}
++
++/* The VBT's LSPCON flag, regardless of the lab override. */
++bool
++intel_bios_encoder_lspcon_vbt(const struct intel_bios_encoder_data *devdata)
+ {
+ 	return devdata && HAS_LSPCON(devdata->display) && devdata->child.lspcon;
+ }
+ 
++/* NUC Display Lab: this port is an LSPCON driven in level-shifter mode. */
++bool
++intel_bios_encoder_lspcon_ls_lab(const struct intel_bios_encoder_data *devdata)
++{
++	return intel_bios_encoder_lspcon_vbt(devdata) &&
++		devdata->display->params.lspcon_ls_lab;
++}
++
+ /* This is an index in the HDMI/DVI DDI buffer translation table, or -1 */
+ int intel_bios_hdmi_level_shift(const struct intel_bios_encoder_data *devdata)
+ {
+diff --git a/drivers/gpu/drm/i915/display/intel_bios.h b/drivers/gpu/drm/i915/display/intel_bios.h
+index 75dff27b4..555742e86 100644
+--- a/drivers/gpu/drm/i915/display/intel_bios.h
++++ b/drivers/gpu/drm/i915/display/intel_bios.h
+@@ -84,6 +84,8 @@ bool intel_bios_encoder_supports_dyn_port_over_tc(const struct intel_bios_encode
+ bool intel_bios_encoder_supports_dsi(const struct intel_bios_encoder_data *devdata);
+ bool intel_bios_encoder_supports_dp_dual_mode(const struct intel_bios_encoder_data *devdata);
+ bool intel_bios_encoder_is_lspcon(const struct intel_bios_encoder_data *devdata);
++bool intel_bios_encoder_lspcon_vbt(const struct intel_bios_encoder_data *devdata);
++bool intel_bios_encoder_lspcon_ls_lab(const struct intel_bios_encoder_data *devdata);
+ bool intel_bios_encoder_lane_reversal(const struct intel_bios_encoder_data *devdata);
+ bool intel_bios_encoder_hpd_invert(const struct intel_bios_encoder_data *devdata);
+ enum port intel_bios_encoder_port(const struct intel_bios_encoder_data *devdata);
 diff --git a/drivers/gpu/drm/i915/display/intel_ddi.c b/drivers/gpu/drm/i915/display/intel_ddi.c
-index 7cd3b5dad..e5e9655eb 100644
+index 7cd3b5dad..fdb169950 100644
 --- a/drivers/gpu/drm/i915/display/intel_ddi.c
 +++ b/drivers/gpu/drm/i915/display/intel_ddi.c
-@@ -3640,6 +3640,15 @@ static void intel_ddi_update_pipe_dp(struct intel_atomic_state *state,
+@@ -2999,6 +2999,10 @@ static void intel_ddi_pre_enable_hdmi(struct intel_atomic_state *state,
+ 	struct intel_digital_port *dig_port = enc_to_dig_port(encoder);
+ 	struct intel_hdmi *intel_hdmi = &dig_port->hdmi;
+ 
++	/* NUC Display Lab: the LSPCON may have lost level-shifter mode. */
++	if (intel_bios_encoder_lspcon_ls_lab(encoder->devdata))
++		intel_dp_lspcon_ls_lab_enter(&dig_port->dp);
++
+ 	intel_dp_dual_mode_set_tmds_output(intel_hdmi, true);
+ 	intel_ddi_enable_clock(encoder, crtc_state);
+ 
+@@ -3636,10 +3640,21 @@ static void intel_ddi_update_pipe_dp(struct intel_atomic_state *state,
+ 				     const struct intel_crtc_state *crtc_state,
+ 				     const struct drm_connector_state *conn_state)
+ {
++	bool dv_lab = enc_to_dig_port(encoder)->lspcon.dv_lab_mode;
++
+ 	intel_ddi_set_dp_msa(crtc_state, conn_state);
  
  	intel_dp_set_infoframes(encoder, true, crtc_state, conn_state);
  
 +	/* NUC Display Lab: a fastset also ends an LSPCON DV lab experiment
 +	 * (restores the driver's AVI and clears the lab mode). */
-+	if (enc_to_dig_port(encoder)->lspcon.dv_lab_mode &&
++	if (dv_lab &&
 +	    intel_lspcon_active(enc_to_dig_port(encoder)) &&
 +	    intel_dp_has_hdmi_sink(&enc_to_dig_port(encoder)->dp))
 +		enc_to_dig_port(encoder)->set_infoframes(encoder,
@@ -18,6 +81,17 @@ index 7cd3b5dad..e5e9655eb 100644
  	intel_backlight_update(state, encoder, crtc_state, conn_state);
  	drm_connector_update_privacy_screen(conn_state);
  }
+@@ -5584,7 +5599,9 @@ void intel_ddi_init(struct intel_display *display,
+ 		if (intel_ddi_init_dp_connector(dig_port))
+ 			goto err_dp_connector_init;
+ 
+-		dig_port->hpd_pulse = intel_dp_hpd_pulse;
++		/* NUC Display Lab: the LSPCON is a level shifter; no native AUX. */
++		if (!intel_bios_encoder_lspcon_ls_lab(devdata))
++			dig_port->hpd_pulse = intel_dp_hpd_pulse;
+ 
+ 		if (dig_port->dp.mso_link_count)
+ 			encoder->pipe_mask = intel_ddi_splitter_pipe_mask(display);
 diff --git a/drivers/gpu/drm/i915/display/intel_display_debugfs.c b/drivers/gpu/drm/i915/display/intel_display_debugfs.c
 index 3f02868ef..70ba8eecc 100644
 --- a/drivers/gpu/drm/i915/display/intel_display_debugfs.c
@@ -41,13 +115,18 @@ index 3f02868ef..70ba8eecc 100644
  
  /**
 diff --git a/drivers/gpu/drm/i915/display/intel_display_params.c b/drivers/gpu/drm/i915/display/intel_display_params.c
-index 60b1c25cb..8e2ec535a 100644
+index 60b1c25cb..15acbe3cb 100644
 --- a/drivers/gpu/drm/i915/display/intel_display_params.c
 +++ b/drivers/gpu/drm/i915/display/intel_display_params.c
-@@ -40,6 +40,10 @@ intel_display_param_named_unsafe(enable_dv_lab, bool, 0400,
+@@ -40,6 +40,15 @@ intel_display_param_named_unsafe(enable_dv_lab, bool, 0400,
  	"Experimental Standard-DV RGB8 tunnel lab, Lunar Lake only (default: off). "
  	"Requires independently validated packed pixels and HDMI frame metadata.");
  
++intel_display_param_named_unsafe(lspcon_ls_lab, int, 0600,
++	"NUC Display Lab: drive a VBT LSPCON port as native HDMI with the LSPCON in "
++	"level-shifter mode (0=off [default], 1=HDMI DDC over GMBUS, 2=HDMI DDC over "
++	"I2C-over-AUX). Read at device probe (rebind to apply). Lab images only.");
++
 +intel_display_param_named_unsafe(lspcon_dv_lab, bool, 0400,
 +	"NUC Display Lab: LSPCON Dolby Vision signalling experiments via debugfs "
 +	"(default: off). Lab images only; never enable in a release.");
@@ -56,14 +135,15 @@ index 60b1c25cb..8e2ec535a 100644
  	"Load VBT from specified file under /lib/firmware");
  
 diff --git a/drivers/gpu/drm/i915/display/intel_display_params.h b/drivers/gpu/drm/i915/display/intel_display_params.h
-index 5e422975a..daff1f0c1 100644
+index 5e422975a..e5ecbd0fa 100644
 --- a/drivers/gpu/drm/i915/display/intel_display_params.h
 +++ b/drivers/gpu/drm/i915/display/intel_display_params.h
-@@ -24,6 +24,7 @@ struct drm_printer;
+@@ -24,6 +24,8 @@ struct drm_printer;
   */
  #define INTEL_DISPLAY_PARAMS_FOR_EACH(param) \
  	param(bool, enable_dv_lab, true, 0) \
 +	param(bool, lspcon_dv_lab, false, 0) \
++	param(int, lspcon_ls_lab, 0, 0) \
  	param(char *, dmc_firmware_path, NULL, 0400) \
  	param(char *, vbt_firmware, NULL, 0400) \
  	param(int, lvds_channel_mode, 0, 0400) \
@@ -82,8 +162,266 @@ index b89458f5e..6928e35e4 100644
  };
  
  struct intel_digital_port {
+diff --git a/drivers/gpu/drm/i915/display/intel_dp.c b/drivers/gpu/drm/i915/display/intel_dp.c
+index 3152122e6..cf4477668 100644
+--- a/drivers/gpu/drm/i915/display/intel_dp.c
++++ b/drivers/gpu/drm/i915/display/intel_dp.c
+@@ -38,6 +38,7 @@
+ #include <linux/types.h>
+ #include <asm/byteorder.h>
+ 
++#include <drm/display/drm_dp_dual_mode_helper.h>
+ #include <drm/display/drm_dp_helper.h>
+ #include <drm/display/drm_dp_tunnel.h>
+ #include <drm/display/drm_dsc_helper.h>
+@@ -5352,6 +5353,10 @@ void intel_dp_set_infoframes(struct intel_encoder *encoder,
+ 
+ 	u32 val = intel_de_read(display, reg) & ~dip_enable;
+ 
++	/* NUC Display Lab: driver-programmed DIPs end any DV lab experiment. */
++	if (!intel_crtc_has_type(crtc_state, INTEL_OUTPUT_DP_MST))
++		enc_to_dig_port(encoder)->lspcon.dv_lab_mode = 0;
++
+ 	/* TODO: Sanitize DSC enabling wrt. intel_dsc_dp_pps_write(). */
+ 	if (!enable && HAS_DSC(display))
+ 		val &= ~VDIP_ENABLE_PPS;
+@@ -6321,6 +6326,10 @@ intel_dp_detect(struct drm_connector *_connector,
+ 	if (!intel_display_device_enabled(display))
+ 		return connector_status_disconnected;
+ 
++	/* NUC Display Lab: the LSPCON is a level shifter; this port is HDMI. */
++	if (intel_bios_encoder_lspcon_ls_lab(encoder->devdata))
++		return connector_status_disconnected;
++
+ 	if (!intel_display_driver_check_access(display))
+ 		return connector->base.status;
+ 
+@@ -6531,6 +6540,12 @@ intel_dp_connector_register(struct drm_connector *_connector)
+ 	if (!ret)
+ 		drm_dp_cec_register_connector(&intel_dp->aux, &connector->base);
+ 
++	if (intel_bios_encoder_lspcon_ls_lab(dig_port->base.devdata)) {
++		if (!ret)
++			intel_dp_lspcon_ls_lab_enter(intel_dp);
++		return ret;
++	}
++
+ 	if (!intel_bios_encoder_is_lspcon(dig_port->base.devdata))
+ 		return ret;
+ 
+@@ -6546,11 +6561,62 @@ intel_dp_connector_register(struct drm_connector *_connector)
+ 	return ret;
+ }
+ 
++/*
++ * NUC Display Lab: put a VBT LSPCON into level-shifter mode through the
++ * standard DP dual-mode register (I2C 0x40 offset 0x40), the register
++ * intel_lspcon_init() uses for PCON mode. Like lspcon_probe(): wake the chip
++ * (it may be in D3 after an unbind), wait for it to identify, then retry.
++ */
++int intel_dp_lspcon_ls_lab_enter(struct intel_dp *intel_dp)
++{
++	struct intel_display *display = to_intel_display(intel_dp);
++	struct intel_digital_port *dig_port = dp_to_dig_port(intel_dp);
++	struct i2c_adapter *ddc = &intel_dp->aux.ddc;
++	enum drm_dp_dual_mode_type type = DRM_DP_DUAL_MODE_NONE;
++	enum drm_lspcon_mode cur = DRM_LSPCON_MODE_INVALID;
++	int i, err = -EIO;
++	u8 rev;
++
++	/* Already in LS mode: nothing to do (and no native AUX, which an
++	 * LSPCON in level-shifter mode does not answer). */
++	if (!drm_lspcon_get_mode(display->drm, ddc, &cur) && cur == DRM_LSPCON_MODE_LS)
++		return 0;
++
++	drm_dp_dpcd_read_byte(&intel_dp->aux, DP_DPCD_REV, &rev);	/* wake from D3 */
++	for (i = 0; i < 6; i++) {
++		type = drm_dp_dual_mode_detect(display->drm, ddc);
++		if (type == DRM_DP_DUAL_MODE_LSPCON)
++			break;
++		usleep_range(500, 1000);
++	}
++	if (!drm_lspcon_get_mode(display->drm, ddc, &cur) && cur == DRM_LSPCON_MODE_LS)
++		err = 0;
++	for (i = 0; i < 3 && err; i++)
++		err = drm_lspcon_set_mode(display->drm, ddc, DRM_LSPCON_MODE_LS, 1000);
++	drm_info(display->drm,
++		 "LSPCON LS lab: port %c adaptor %s, was %s, level-shifter mode %s (%d), HDMI DDC via %s\n",
++		 port_name(dig_port->base.port), drm_dp_get_dual_mode_type_name(type),
++		 cur == DRM_LSPCON_MODE_LS ? "LS" : cur == DRM_LSPCON_MODE_PCON ? "PCON" : "?",
++		 err ? "FAILED" : "set", err,
++		 display->params.lspcon_ls_lab == 2 ? "I2C-over-AUX" : "GMBUS");
++	return err;
++}
++
+ static void
+ intel_dp_connector_unregister(struct drm_connector *_connector)
+ {
+ 	struct intel_connector *connector = to_intel_connector(_connector);
+ 	struct intel_dp *intel_dp = intel_attached_dp(connector);
++	struct intel_display *display = to_intel_display(connector);
++
++	/* NUC Display Lab: leave the LSPCON as i915 normally expects it:
++	 * TMDS output on, PCON mode. */
++	if (intel_bios_encoder_lspcon_ls_lab(dp_to_dig_port(intel_dp)->base.devdata)) {
++		drm_dp_dual_mode_set_tmds_output(display->drm, DRM_DP_DUAL_MODE_LSPCON,
++						 &intel_dp->aux.ddc, true);
++		drm_lspcon_set_mode(display->drm, &intel_dp->aux.ddc,
++				    DRM_LSPCON_MODE_PCON, 1000);
++	}
+ 
+ 	drm_dp_cec_unregister_connector(&intel_dp->aux);
+ 	drm_dp_aux_unregister(&intel_dp->aux);
+diff --git a/drivers/gpu/drm/i915/display/intel_dp.h b/drivers/gpu/drm/i915/display/intel_dp.h
+index 04fae203b..3c2c8f0fd 100644
+--- a/drivers/gpu/drm/i915/display/intel_dp.h
++++ b/drivers/gpu/drm/i915/display/intel_dp.h
+@@ -130,6 +130,7 @@ bool intel_dp_joiner_needs_dsc(struct intel_display *display,
+ bool intel_dp_has_joiner(struct intel_dp *intel_dp);
+ bool intel_dp_needs_vsc_colorimetry(const struct intel_crtc_state *crtc_state,
+ 				    const struct drm_connector_state *conn_state);
++int intel_dp_lspcon_ls_lab_enter(struct intel_dp *intel_dp);
+ void intel_dp_set_infoframes(struct intel_encoder *encoder, bool enable,
+ 			     const struct intel_crtc_state *crtc_state,
+ 			     const struct drm_connector_state *conn_state);
+diff --git a/drivers/gpu/drm/i915/display/intel_hdmi.c b/drivers/gpu/drm/i915/display/intel_hdmi.c
+index 4eb04b2c3..26ea00d71 100644
+--- a/drivers/gpu/drm/i915/display/intel_hdmi.c
++++ b/drivers/gpu/drm/i915/display/intel_hdmi.c
+@@ -1366,10 +1366,28 @@ static void hsw_set_infoframes(struct intel_encoder *encoder,
+ 		intel_hdmi_qms_write_vtem(display, crtc_state, true);
+ }
+ 
++/* NUC Display Lab: on an LSPCON in level-shifter mode the dual-mode
++ * registers are reached through the LSPCON's I2C-over-AUX bridge (where i915
++ * always talks to it), whatever adapter carries the EDID. */
++static struct i2c_adapter *intel_hdmi_dual_mode_ddc(struct intel_hdmi *hdmi)
++{
++	struct intel_digital_port *dig_port = hdmi_to_dig_port(hdmi);
++
++	if (intel_bios_encoder_lspcon_ls_lab(dig_port->base.devdata))
++		return &dig_port->dp.aux.ddc;
++	return hdmi->attached_connector->base.ddc;
++}
++
++static bool intel_hdmi_ddc_is_gmbus(struct intel_hdmi *hdmi)
++{
++	return hdmi->attached_connector->base.ddc !=
++		&hdmi_to_dig_port(hdmi)->dp.aux.ddc;
++}
++
+ void intel_dp_dual_mode_set_tmds_output(struct intel_hdmi *hdmi, bool enable)
+ {
+ 	struct intel_display *display = to_intel_display(hdmi);
+-	struct i2c_adapter *ddc = hdmi->attached_connector->base.ddc;
++	struct i2c_adapter *ddc = intel_hdmi_dual_mode_ddc(hdmi);
+ 
+ 	if (hdmi->dp_dual_mode.type < DRM_DP_DUAL_MODE_TYPE2_DVI)
+ 		return;
+@@ -1456,6 +1474,10 @@ int intel_hdmi_hdcp_write_an_aksv(struct intel_digital_port *dig_port,
+ 		return ret;
+ 	}
+ 
++	/* NUC Display Lab: AKSV output needs a GMBUS adapter. */
++	if (!intel_hdmi_ddc_is_gmbus(hdmi))
++		return -EINVAL;
++
+ 	ret = intel_gmbus_output_aksv(ddc);
+ 	if (ret < 0) {
+ 		drm_dbg_kms(display->drm, "Failed to output aksv (%d)\n", ret);
+@@ -3032,11 +3054,16 @@ int intel_hdmi_compute_config(struct intel_encoder *encoder,
+ 			edid ? edid->data : NULL, edid ? edid->length : 0);
+ 		struct intel_dv_lab_link link = {
+ 			.requested = true,
+-			.lab_enabled = display->params.enable_dv_lab && DISPLAY_VER(display) >= 12,
++			.lab_enabled = display->params.enable_dv_lab &&
++				(DISPLAY_VER(display) >= 12 ||
++				 intel_bios_encoder_lspcon_ls_lab(encoder->devdata)),
+ 			.sink_standard = caps.status == DV_EDID_STANDARD,
+ 			.hdmi = pipe_config->has_hdmi_sink && pipe_config->has_infoframe &&
+ 				connector->base.display_info.has_hdmi_infoframe,
+-			.native_hdmi = intel_dv_lab_native_hdmi(
++			/* NUC Display Lab: an LSPCON in level-shifter mode
++			 * passes the GPU's own HDMI packets through. */
++			.native_hdmi = intel_bios_encoder_lspcon_ls_lab(encoder->devdata) ||
++				intel_dv_lab_native_hdmi(
+ 				enc_to_dig_port(encoder)->lspcon.active,
+ 				enc_to_intel_hdmi(encoder)->dp_dual_mode.type != DRM_DP_DUAL_MODE_NONE,
+ 				intel_bios_encoder_supports_dp_dual_mode(encoder->devdata)),
+@@ -3158,10 +3185,18 @@ intel_hdmi_dp_dual_mode_detect(struct drm_connector *_connector)
+ 	struct intel_display *display = to_intel_display(connector);
+ 	struct intel_hdmi *hdmi = intel_attached_hdmi(connector);
+ 	struct intel_encoder *encoder = &hdmi_to_dig_port(hdmi)->base;
+-	struct i2c_adapter *ddc = connector->base.ddc;
++	struct i2c_adapter *ddc = intel_hdmi_dual_mode_ddc(hdmi);
+ 	enum drm_dp_dual_mode_type type;
++	int tries = intel_bios_encoder_lspcon_ls_lab(encoder->devdata) ? 6 : 1;
+ 
+-	type = drm_dp_dual_mode_detect(display->drm, ddc);
++	/* NUC Display Lab: an idle LSPCON may miss the first read; retry as
++	 * lspcon_probe() does. */
++	do {
++		type = drm_dp_dual_mode_detect(display->drm, ddc);
++		if (type != DRM_DP_DUAL_MODE_UNKNOWN && type != DRM_DP_DUAL_MODE_NONE)
++			break;
++		usleep_range(500, 1000);
++	} while (--tries);
+ 
+ 	/*
+ 	 * Type 1 DVI adaptors are not required to implement any
+@@ -3219,7 +3254,8 @@ intel_hdmi_set_edid(struct drm_connector *_connector)
+ 
+ 	drm_edid = drm_edid_read_ddc(&connector->base, ddc);
+ 
+-	if (!drm_edid && !intel_gmbus_is_forced_bit(ddc)) {
++	if (!drm_edid && intel_hdmi_ddc_is_gmbus(intel_attached_hdmi(connector)) &&
++	    !intel_gmbus_is_forced_bit(ddc)) {
+ 		drm_dbg_kms(display->drm,
+ 			    "HDMI GMBUS EDID read failed, retry using GPIO bit-banging\n");
+ 		intel_gmbus_force_bit(ddc, true);
+@@ -3427,16 +3463,23 @@ intel_hdmi_add_properties(struct intel_hdmi *intel_hdmi, struct drm_connector *_
+ 	struct intel_connector *connector = to_intel_connector(_connector);
+ 	struct intel_display *display = to_intel_display(intel_hdmi);
+ 
+-	if (display->params.enable_dv_lab && DISPLAY_VER(display) >= 12) {
++	if (display->params.enable_dv_lab &&
++	    (DISPLAY_VER(display) >= 12 ||
++	     intel_bios_encoder_lspcon_ls_lab(hdmi_to_dig_port(intel_hdmi)->base.devdata))) {
+ 		ratelimit_state_init(&connector->dv_log_limit, 30 * HZ, 1);
+ 		connector->dv_lab_property = drm_property_create_bool(display->drm,
+ 			DRM_MODE_PROP_ATOMIC, "DVBRIDGE_DV_STANDARD_LAB");
+ 		if (connector->dv_lab_property)
+ 			drm_object_attach_property(&_connector->base, connector->dv_lab_property, 0);
+-		connector->dv_hdr10_property = drm_property_create_bool(display->drm,
+-			DRM_MODE_PROP_ATOMIC, "DVBRIDGE_HDR10_DEEP_COLOR");
+-		if (connector->dv_hdr10_property)
+-			drm_object_attach_property(&_connector->base, connector->dv_hdr10_property, 0);
++		/* HDR10 needs the DRM InfoFrame DIP (gen10+); not on the gen9
++		 * level-shifter lab port. */
++		if (DISPLAY_VER(display) >= 12) {
++			connector->dv_hdr10_property = drm_property_create_bool(display->drm,
++				DRM_MODE_PROP_ATOMIC, "DVBRIDGE_HDR10_DEEP_COLOR");
++			if (connector->dv_hdr10_property)
++				drm_object_attach_property(&_connector->base,
++							   connector->dv_hdr10_property, 0);
++		}
+ 	}
+ 
+ 	intel_attach_force_audio_property(&connector->base);
+@@ -3869,6 +3912,11 @@ bool intel_hdmi_init_connector(struct intel_digital_port *dig_port,
+ 	drm_connector_init_with_ddc(dev, connector,
+ 				    &intel_hdmi_connector_funcs,
+ 				    DRM_MODE_CONNECTOR_HDMIA,
++				    /* NUC Display Lab: LSPCON in LS mode, DDC through
++				     * the LSPCON's I2C-over-AUX bridge. */
++				    intel_bios_encoder_lspcon_ls_lab(intel_encoder->devdata) &&
++				    display->params.lspcon_ls_lab == 2 ?
++				    &dig_port->dp.aux.ddc :
+ 				    intel_gmbus_get_adapter(display, ddc_pin));
+ 
+ 	drm_connector_helper_add(connector, &intel_hdmi_connector_helper_funcs);
 diff --git a/drivers/gpu/drm/i915/display/intel_lspcon.c b/drivers/gpu/drm/i915/display/intel_lspcon.c
-index 9ceabbc98..a32b34f28 100644
+index 9ceabbc98..b2eb1d5ea 100644
 --- a/drivers/gpu/drm/i915/display/intel_lspcon.c
 +++ b/drivers/gpu/drm/i915/display/intel_lspcon.c
 @@ -23,7 +23,9 @@
@@ -132,7 +470,7 @@ index 9ceabbc98..a32b34f28 100644
  	drm_dbg_kms(display->drm, "Success: LSPCON init\n");
  	return true;
  }
-@@ -754,3 +764,421 @@ void intel_lspcon_resume(struct intel_digital_port *dig_port)
+@@ -754,3 +764,470 @@ void intel_lspcon_resume(struct intel_digital_port *dig_port)
  	else
  		drm_dbg_kms(display->drm, "LSPCON resume success\n");
  }
@@ -265,6 +603,30 @@ index 9ceabbc98..a32b34f28 100644
 +	return ret;
 +}
 +
++/*
++ * Lab routes. MCA: the NUC7's MegaChips LSPCON (gen9/10; AVI via the MCA
++ * mailbox). PCON: any other DP branch with an HDMI downstream port on gen11+
++ * (e.g. the INUC 11's onboard converters); AVI as an InfoFrame SDP in the
++ * transcoder's AVI DIP, since a DP-to-HDMI protocol converter has no mailbox.
++ */
++enum { DV_LAB_ROUTE_NONE, DV_LAB_ROUTE_MCA, DV_LAB_ROUTE_PCON };
++
++static int lspcon_dv_lab_route(struct intel_digital_port *dig_port)
++{
++	struct intel_display *display = to_intel_display(dig_port);
++	struct intel_dp *intel_dp = &dig_port->dp;
++
++	if (dig_port->lspcon.active)
++		return dig_port->lspcon.vendor == LSPCON_VENDOR_MCA &&
++			DISPLAY_VER(display) < 11 ? DV_LAB_ROUTE_MCA : DV_LAB_ROUTE_NONE;
++	if (DISPLAY_VER(display) >= 11 && drm_dp_is_branch(intel_dp->dpcd) &&
++	    (intel_dp->downstream_ports[0] & DP_DS_PORT_TYPE_MASK) == DP_DS_PORT_TYPE_HDMI)
++		return DV_LAB_ROUTE_PCON;
++	return DV_LAB_ROUTE_NONE;
++}
++
++static const char * const lspcon_dv_lab_routes[] = { "none", "mca", "pcon" };
++
 +static int lspcon_dv_lab_apply(struct intel_connector *connector,
 +			       const struct intel_crtc_state *crtc_state,
 +			       int cmd)
@@ -278,6 +640,8 @@ index 9ceabbc98..a32b34f28 100644
 +	enum transcoder trans = crtc_state->cpu_transcoder;
 +	u8 avi[VIDEO_DIP_DATA_SIZE] = {}, hdmi[VIDEO_DIP_DATA_SIZE] = {};
 +	u8 sdp[VIDEO_DIP_DATA_SIZE] = {}, sdp2[VIDEO_DIP_DATA_SIZE] = {};
++	u8 avisdp[VIDEO_DIP_DATA_SIZE] = {};
++	int route = lspcon_dv_lab_route(dig_port);
 +	int avi_len, len;
 +	u32 val;
 +
@@ -290,8 +654,11 @@ index 9ceabbc98..a32b34f28 100644
 +	if (cmd == LSPCON_DV_LAB_OFF) {
 +		/* Exactly what the enable path does. */
 +		intel_dp_set_infoframes(encoder, true, crtc_state, conn_state);
-+		lspcon_set_infoframes(encoder, true, crtc_state, conn_state);
-+		drm_info(display->drm, "LSPCON DV lab: off, driver state restored\n");
++		if (route == DV_LAB_ROUTE_MCA)
++			lspcon_set_infoframes(encoder, true, crtc_state, conn_state);
++		lspcon->dv_lab_mode = 0;
++		drm_info(display->drm, "LSPCON DV lab: off (%s), driver state restored\n",
++			 lspcon_dv_lab_routes[route]);
 +		return 0;
 +	}
 +
@@ -308,7 +675,8 @@ index 9ceabbc98..a32b34f28 100644
 +		return -EINVAL;
 +
 +	/* AVI first: if the mailbox write fails, nothing else has changed. */
-+	if (!_lspcon_write_avi_infoframe_mca(&intel_dp->aux, avi, avi_len)) {
++	if (route == DV_LAB_ROUTE_MCA &&
++	    !_lspcon_write_avi_infoframe_mca(&intel_dp->aux, avi, avi_len)) {
 +		drm_err(display->drm, "LSPCON DV lab: AVI write failed\n");
 +		return -EIO;
 +	}
@@ -319,6 +687,20 @@ index 9ceabbc98..a32b34f28 100644
 +	val &= ~(VIDEO_DIP_ENABLE_VS_HSW | VIDEO_DIP_ENABLE_GMP_HSW);
 +	intel_de_write(display, HSW_TVIDEO_DIP_CTL(display, trans), val);
 +	intel_de_posting_read(display, HSW_TVIDEO_DIP_CTL(display, trans));
++
++	if (route == DV_LAB_ROUTE_PCON) {
++		/* The DV AVI as a DP InfoFrame SDP (00 82 1d 4c | 02 0d | PB1..):
++		 * a protocol converter turns InfoFrame SDPs into HDMI InfoFrames. */
++		avisdp[1] = avi[0];
++		avisdp[2] = 0x1d;
++		avisdp[3] = 0x13 << 2;
++		avisdp[4] = avi[1];
++		avisdp[5] = avi[2];
++		memcpy(&avisdp[6], &avi[HDMI_INFOFRAME_HEADER_SIZE],
++		       min_t(int, avi_len - HDMI_INFOFRAME_HEADER_SIZE, VIDEO_DIP_DATA_SIZE - 6));
++		hsw_write_infoframe(encoder, crtc_state, HDMI_INFOFRAME_TYPE_AVI,
++				    avisdp, sizeof(avisdp));
++	}
 +
 +	switch (cmd) {
 +	case LSPCON_DV_LAB_H1:
@@ -334,8 +716,8 @@ index 9ceabbc98..a32b34f28 100644
 +				    sdp, sizeof(sdp));
 +		break;
 +	}
-+	drm_info(display->drm, "LSPCON DV lab: %s AVI %*ph\n",
-+		 lspcon_dv_lab_names[cmd], avi_len, avi);
++	drm_info(display->drm, "LSPCON DV lab: %s (%s) AVI %*ph\n",
++		 lspcon_dv_lab_names[cmd], lspcon_dv_lab_routes[route], avi_len, avi);
 +	if (cmd == LSPCON_DV_LAB_H1B)
 +		drm_info(display->drm, "LSPCON DV lab: VS DIP %*ph\n",
 +			 (int)sizeof(sdp2), sdp2);
@@ -395,8 +777,7 @@ index 9ceabbc98..a32b34f28 100644
 +{
 +	struct intel_digital_port *dig_port = intel_attached_dig_port(connector);
 +
-+	if (!dig_port || !dig_port->lspcon.active ||
-+	    dig_port->lspcon.vendor != LSPCON_VENDOR_MCA)
++	if (!dig_port || lspcon_dv_lab_route(dig_port) == DV_LAB_ROUTE_NONE)
 +		return -ENODEV;
 +	if (!crtc_state->hw.active || !intel_dp_has_hdmi_sink(&dig_port->dp))
 +		return -ENODEV;
@@ -404,8 +785,6 @@ index 9ceabbc98..a32b34f28 100644
 +	if (crtc_state->output_format != INTEL_OUTPUT_FORMAT_RGB ||
 +	    crtc_state->limited_color_range)
 +		return -EINVAL;
-+	if (DISPLAY_VER(to_intel_display(connector)) >= 11)
-+		return -ENODEV;	/* gen9/10 DIP layout only */
 +	return 0;
 +}
 +
@@ -415,7 +794,7 @@ index 9ceabbc98..a32b34f28 100644
 +{
 +	int ret = lspcon_dv_lab_check(connector, crtc_state);
 +
-+	/* off and crc are always safe on an active MCA LSPCON pipe. */
++	/* off and crc are always safe on an active lab-route pipe. */
 +	if (ret == -EINVAL && (cmd == LSPCON_DV_LAB_OFF || cmd == LSPCON_DV_LAB_CRC))
 +		ret = 0;
 +	return ret ? ret : lspcon_dv_lab_apply(connector, crtc_state, cmd);
@@ -437,10 +816,14 @@ index 9ceabbc98..a32b34f28 100644
 +
 +	seq_printf(m, "check: %d\n", ret);
 +	seq_printf(m, "mode: %s\n", lspcon_dv_lab_names[lspcon->dv_lab_mode]);
++	seq_printf(m, "route: %s\n", lspcon_dv_lab_routes[lspcon_dv_lab_route(dig_port)]);
 +	seq_printf(m, "lspcon: active=%d vendor=%s hdr=%d pcon=%d\n",
 +		   lspcon->active,
++		   !lspcon->active ? "none" :
 +		   lspcon->vendor == LSPCON_VENDOR_MCA ? "mca" : "parade",
 +		   lspcon->hdr_supported, lspcon->mode == DRM_LSPCON_MODE_PCON);
++	seq_printf(m, "dpcd: rev %02x branch %d dfp %4ph\n", intel_dp->dpcd[DP_DPCD_REV],
++		   drm_dp_is_branch(intel_dp->dpcd), intel_dp->downstream_ports);
 +	seq_printf(m, "branch: oui %3phD dev-id %.6s hw %d.%d sw %d.%d\n",
 +		   intel_dp->desc.ident.oui, intel_dp->desc.ident.device_id,
 +		   intel_dp->desc.ident.hw_rev >> 4, intel_dp->desc.ident.hw_rev & 0xf,
@@ -459,6 +842,8 @@ index 9ceabbc98..a32b34f28 100644
 +	seq_printf(m, "vs_dip: %*ph\n", (int)sizeof(buf), buf);
 +	hsw_read_infoframe(encoder, crtc_state, HDMI_PACKET_TYPE_GAMUT_METADATA, buf, sizeof(buf));
 +	seq_printf(m, "gmp_dip: %*ph\n", (int)sizeof(buf), buf);
++	hsw_read_infoframe(encoder, crtc_state, HDMI_INFOFRAME_TYPE_AVI, buf, sizeof(buf));
++	seq_printf(m, "avi_dip: %*ph\n", (int)sizeof(buf), buf);
 +	if (drm_dp_dpcd_read_byte(&intel_dp->aux, DP_TEST_SINK_MISC, buf) == 0)
 +		seq_printf(m, "test_sink_misc: 0x%02x crc_supported %d\n", buf[0],
 +			   !!(buf[0] & DP_TEST_CRC_SUPPORTED));
@@ -544,8 +929,10 @@ index 9ceabbc98..a32b34f28 100644
 +	struct intel_display *display = to_intel_display(connector);
 +	struct intel_encoder *encoder = intel_attached_encoder(connector);
 +
-+	if (!display->params.lspcon_dv_lab || !encoder ||
-+	    !intel_bios_encoder_is_lspcon(encoder->devdata))
++	/* Any SST DP connector: the route (MCA LSPCON or gen11+ DP-to-HDMI
++	 * protocol converter) is decided when a command is written. */
++	if (!display->params.lspcon_dv_lab || !encoder || connector->mst.dp ||
++	    connector->base.connector_type != DRM_MODE_CONNECTOR_DisplayPort)
 +		return;
 +	debugfs_create_file("i915_lspcon_dv_lab", 0600,
 +			    connector->base.debugfs_entry, connector,

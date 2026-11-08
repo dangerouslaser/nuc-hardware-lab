@@ -7,11 +7,17 @@
 // exits. On exit (normal, crash or SIGKILL from the caller's timeout) the DRM
 // file closes and i915 restores the console: that is the restore path.
 //
-// usage: dvprobe --debugfs DIR [--frame FILE | --pattern levels]
-//                [--exp off|avi|h1|h1b|h2] [--hdr] [--hz 24|60]
-//                [--secs N] [--log FILE]
-//   --frame  raw 3840x2160 XRGB8888 (B,G,R,X bytes), e.g. a DV tunnel frame
-//   --hdr    HDR10 control: HDR_OUTPUT_METADATA (PQ) + Colorspace BT2020_RGB
+// usage: dvprobe [--debugfs DIR] [--frame FILE | --pattern levels]
+//                [--exp off|avi|h1|h1b|h2] [--hdr] [--dv] [--hz 24|60]
+//                [--connector auto|dp|hdmi] [--info FILE] [--secs N] [--log FILE]
+//   --debugfs   the DP connector's debugfs dir (LSPCON DV lab); without it no
+//               lab command is sent (--exp must be off)
+//   --frame     raw 3840x2160 XRGB8888 (B,G,R,X bytes), e.g. a DV tunnel frame
+//   --hdr       HDR10 control: HDR_OUTPUT_METADATA (PQ) + Colorspace BT2020_RGB
+//   --dv        set DVBRIDGE_DV_STANDARD_LAB=1 in the modeset (the native-HDMI
+//               Dolby Vision path: AVI + Dolby VSIF from the GPU's HDMI DIPs)
+//   --connector auto: the connected HDMI-A connector, else DisplayPort
+//   --info      a debugfs file to copy into the log (e.g. i915_display_info)
 //
 // Derived from ps5-libreelec/port/dvcrc.c and hdrtest.c.
 #include <errno.h>
@@ -67,7 +73,11 @@ static uint16_t crc16_dp(uint16_t b, uint16_t d)
 
 static int lab_write(const char *cmd)
 {
-	int f = open(labfile, O_WRONLY);
+	int f;
+
+	if (!labfile[0])
+		return 0;
+	f = open(labfile, O_WRONLY);
 	int ret = 0;
 
 	if (f < 0 || write(f, cmd, strlen(cmd)) < 0)
@@ -78,10 +88,21 @@ static int lab_write(const char *cmd)
 	return ret;
 }
 
+static const char *infofile;
+
 static void lab_dump(const char *tag)
 {
 	char line[512];
-	FILE *f = fopen(labfile, "r");
+	FILE *f;
+
+	if (infofile && (f = fopen(infofile, "r"))) {
+		while (fgets(line, sizeof(line), f))
+			out("[%s:info] %s", tag, line);
+		fclose(f);
+	}
+	if (!labfile[0])
+		return;
+	f = fopen(labfile, "r");
 
 	if (!f) {
 		out("[%s] cannot read %s: %s\n", tag, labfile, strerror(errno));
@@ -193,7 +214,8 @@ int main(int argc, char **argv)
 {
 	const char *frame = NULL, *pattern = "levels", *exp = "off", *debugfs = NULL;
 	const char *logpath = NULL;
-	int hz = 24, secs = 20, hdr = 0;
+	const char *conn_type = "auto";
+	int hz = 24, secs = 20, hdr = 0, dv = 0;
 
 	for (int i = 1; i < argc; i++) {
 		if (!strcmp(argv[i], "--frame") && i + 1 < argc) frame = argv[++i];
@@ -204,6 +226,9 @@ int main(int argc, char **argv)
 		else if (!strcmp(argv[i], "--secs") && i + 1 < argc) secs = atoi(argv[++i]);
 		else if (!strcmp(argv[i], "--log") && i + 1 < argc) logpath = argv[++i];
 		else if (!strcmp(argv[i], "--hdr")) hdr = 1;
+		else if (!strcmp(argv[i], "--dv")) dv = 1;
+		else if (!strcmp(argv[i], "--connector") && i + 1 < argc) conn_type = argv[++i];
+		else if (!strcmp(argv[i], "--info") && i + 1 < argc) infofile = argv[++i];
 		else {
 			fprintf(stderr, "usage: see the comment at the top of dvprobe.c\n");
 			return 2;
@@ -211,16 +236,17 @@ int main(int argc, char **argv)
 	}
 	if (logpath)
 		logf = fopen(logpath, "a");
-	if (!debugfs) {
-		out("--debugfs is required\n");
+	if (debugfs)
+		snprintf(labfile, sizeof(labfile), "%s/i915_lspcon_dv_lab", debugfs);
+	else if (strcmp(exp, "off")) {
+		out("--exp needs --debugfs\n");
 		return 2;
 	}
-	snprintf(labfile, sizeof(labfile), "%s/i915_lspcon_dv_lab", debugfs);
 	signal(SIGINT, on_signal);
 	signal(SIGTERM, on_signal);
 	signal(SIGHUP, on_signal);
-	out("dvprobe: exp=%s hz=%d hdr=%d secs=%d frame=%s\n", exp, hz, hdr, secs,
-	    frame ? frame : pattern);
+	out("dvprobe: exp=%s hz=%d hdr=%d dv=%d connector=%s secs=%d frame=%s\n", exp,
+	    hz, hdr, dv, conn_type, secs, frame ? frame : pattern);
 
 	fd = open_i915();
 	if (fd < 0 || drmSetClientCap(fd, DRM_CLIENT_CAP_UNIVERSAL_PLANES, 1) ||
@@ -232,19 +258,33 @@ int main(int argc, char **argv)
 		out("note: drmSetMaster: %s\n", strerror(errno));
 
 	drmModeRes *res = drmModeGetResources(fd);
+	/* auto: a connected HDMI-A connector wins (LSPCON level-shifter lab),
+	 * then DisplayPort (the NUC7's LSPCON port in PCON mode). */
 	drmModeConnector *conn = NULL;
-	for (int i = 0; res && i < res->count_connectors; i++) {
-		conn = drmModeGetConnector(fd, res->connectors[i]);
-		if (conn && conn->connection == DRM_MODE_CONNECTED &&
-		    conn->connector_type == DRM_MODE_CONNECTOR_DisplayPort)
-			break;
-		drmModeFreeConnector(conn);
-		conn = NULL;
-	}
+	static const uint32_t order_auto[] = { DRM_MODE_CONNECTOR_HDMIA, DRM_MODE_CONNECTOR_DisplayPort };
+	uint32_t want[2];
+	int nwant = 0;
+	if (!strcmp(conn_type, "hdmi"))
+		want[nwant++] = DRM_MODE_CONNECTOR_HDMIA;
+	else if (!strcmp(conn_type, "dp"))
+		want[nwant++] = DRM_MODE_CONNECTOR_DisplayPort;
+	else
+		for (int k = 0; k < 2; k++)
+			want[nwant++] = order_auto[k];
+	for (int k = 0; k < nwant && !conn; k++)
+		for (int i = 0; res && i < res->count_connectors; i++) {
+			conn = drmModeGetConnector(fd, res->connectors[i]);
+			if (conn && conn->connection == DRM_MODE_CONNECTED &&
+			    conn->connector_type == want[k])
+				break;
+			drmModeFreeConnector(conn);
+			conn = NULL;
+		}
 	if (!conn) {
-		out("no connected DisplayPort connector (the NUC7 HDMI port is DP-1)\n");
+		out("no connected %s connector\n", conn_type);
 		return 1;
 	}
+	out("connector type %s\n", conn->connector_type == DRM_MODE_CONNECTOR_HDMIA ? "HDMI-A" : "DP");
 
 	/* 23.976 / 59.94: the lower clock of the two 3840x2160 modes per rate. */
 	drmModeModeInfo *mode = NULL;
@@ -369,6 +409,10 @@ int main(int argc, char **argv)
 	} else {
 		add(req, c, DRM_MODE_OBJECT_CONNECTOR, "Colorspace", 0, "Default");
 		add(req, c, DRM_MODE_OBJECT_CONNECTOR, "HDR_OUTPUT_METADATA", 0, NULL);
+	}
+	if (add(req, c, DRM_MODE_OBJECT_CONNECTOR, "DVBRIDGE_DV_STANDARD_LAB", dv, NULL) && dv) {
+		out("dv requested but the connector has no DVBRIDGE_DV_STANDARD_LAB property\n");
+		return 4;
 	}
 	add(req, crtc_id, DRM_MODE_OBJECT_CRTC, "MODE_ID", mode_blob, NULL);
 	add(req, crtc_id, DRM_MODE_OBJECT_CRTC, "ACTIVE", 1, NULL);

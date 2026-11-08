@@ -183,7 +183,8 @@ ls -lh "$W/initramfs.zst"
 
 log "Building unified kernel image"
 CMDLINE="rdinit=/init console=tty1 quiet loglevel=3 fbcon=font:TER16x32 drm.debug=0x4 log_buf_len=64M"
-[ "$VARIANT" = dvlab ] && CMDLINE="$CMDLINE i915.lspcon_dv_lab=1"
+# qms=0: the yblod QMS VTEM is 36 bytes, gen9's GMP DIP is 32 (lab only).
+[ "$VARIANT" = dvlab ] && CMDLINE="$CMDLINE i915.lspcon_dv_lab=1 i915.qms=0"
 ukify build --linux "$VMLINUZ" --initrd "$W/initramfs.zst" \
 	--cmdline "$CMDLINE" --uname "$KVER" --os-release "@$ROOT/etc/os-release" \
 	--output "$W/BOOTX64.EFI" >/dev/null
