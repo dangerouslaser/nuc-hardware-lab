@@ -23,4 +23,11 @@ timeout 900 qemu-system-x86_64 -m 2048 -smp 2 -bios /tmp/ovmf.bin \
 mkdir -p /out/qemu-reports
 mcopy -s -o -i /tmp/t.img@@1M ::/reports /out/qemu-reports/ || true
 '
-grep -q NUCLAB-TEST-DONE "$repo/out/qemu-serial.log" && echo "SMOKE TEST: finished" || { echo "SMOKE TEST: did not finish"; exit 1; }
+log=$repo/out/qemu-serial.log
+grep -q NUCLAB-TEST-DONE "$log" || { echo "SMOKE TEST: did not finish"; exit 1; }
+if grep -q NUCLAB-MODULE-FAIL "$log"; then
+	grep NUCLAB-MODULE "$log"; echo "SMOKE TEST: a required module failed to load"; exit 1
+fi
+grep -q "^Result: " "$log" || { echo "SMOKE TEST: no summary on screen"; exit 1; }
+grep NUCLAB-MODULE-OK "$log"
+echo "SMOKE TEST: passed"

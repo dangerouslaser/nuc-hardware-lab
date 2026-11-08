@@ -53,7 +53,7 @@ keep() { # keep DIR... relative to kernel/
 }
 rm -rf "$K"; mkdir -p "$K"
 keep arch crypto lib kernel virt security \
-	net/wireless net/mac80211 net/rfkill net/packet \
+	net/wireless net/mac80211 net/rfkill net/packet net/core \
 	fs/fat fs/nls \
 	drivers/gpu/drm/i915 drivers/gpu/drm/display drivers/gpu/drm/ttm \
 	drivers/gpu/drm/tiny drivers/gpu/drm/virtio drivers/gpu/drm/bochs \
@@ -62,7 +62,7 @@ keep arch crypto lib kernel virt security \
 	drivers/net/ethernet/realtek drivers/net/wireless/intel drivers/net/phy \
 	drivers/net/mdio drivers/platform drivers/char drivers/pci drivers/mfd \
 	drivers/misc drivers/virtio drivers/firmware drivers/base drivers/dma \
-	drivers/iommu drivers/thermal drivers/leds drivers/powercap
+	drivers/iommu drivers/thermal drivers/leds drivers/powercap drivers/hwmon
 for f in /lib/modules/$KVER/kernel/drivers/gpu/drm/*.ko* \
 	/lib/modules/$KVER/kernel/drivers/net/*.ko* \
 	/lib/modules/$KVER/kernel/drivers/scsi/sd_mod.ko* \
@@ -72,26 +72,49 @@ for f in /lib/modules/$KVER/kernel/drivers/gpu/drm/*.ko* \
 	d=${f#/lib/modules/$KVER/kernel/}; mkdir -p "$K/$(dirname "$d")"; cp -a "$f" "$K/$d"
 done
 rm -f "$K/drivers/gpu/drm/i915/kvmgt.ko"*  # GVT-g host support, not needed
-depmod -b "$ROOT" -e -F "/boot/System.map-$KVER" "$KVER" 2>&1 | grep -E "i915|e1000e|iwl|usb_storage|uas|vfat|drm" | head -20 || true
-for m in i915 e1000e r8169 igc iwlmvm usb_storage uas vfat nls_cp437 i2c_dev \
-	virtio_net virtio_pci; do
-	modprobe -d "$ROOT" -S "$KVER" -D "$m" >/dev/null ||
+# Check symbols for every module the survey depends on, including transitive
+# dependencies: modprobe -D alone only checks that module files exist (a
+# missing hwmon.ko once stopped i915 loading on a real NUC).
+depmod -b "$ROOT" -e -F "/boot/System.map-$KVER" "$KVER" 2>"$W/depmod.log" || true
+: >"$W/needed"
+for m in i915 e1000e r8169 igc iwlmvm usb_storage uas sd_mod vfat nls_cp437 \
+	nls_iso8859_1 i2c_dev xhci_pci virtio_net virtio_pci; do
+	modprobe -d "$ROOT" -S "$KVER" -D "$m" >"$W/deps" ||
 		{ echo "missing module or dependency: $m" >&2; exit 1; }
+	sed -n 's#^insmod .*/kernel/##p' "$W/deps" | sed 's/ .*//' >>"$W/needed"
 done
+bad=$(sort -u "$W/needed" | while read -r k; do
+	grep -F "/kernel/$k needs unknown symbol" "$W/depmod.log" || true
+done)
+if [ -n "$bad" ]; then
+	echo "$bad" | sed 's#.*/kernel/##' >&2
+	echo "required kernel modules have unresolved symbols" >&2
+	exit 1
+fi
+echo "module check: $(sort -u "$W/needed" | wc -l) required modules resolve"
 
 log "Adding firmware"
 FW=$ROOT/lib/firmware
 mkdir -p "$FW"
-cp -a /lib/firmware/i915 "$FW/"
+cp -RL /lib/firmware/i915 "$FW/"  # -L: Alpine dedups firmware with symlinks
 # Intel Wi-Fi used in Kaby Lake to Tiger Lake NUCs (8260/8265, 9260/9560, AX200/201).
 for f in /lib/firmware/iwlwifi-8000C-* /lib/firmware/iwlwifi-8265-* \
 	/lib/firmware/iwlwifi-9000-* /lib/firmware/iwlwifi-9260-* \
 	/lib/firmware/iwlwifi-cc-a0-* /lib/firmware/iwlwifi-QuZ-a0-hr-b0-*; do
-	[ -e "$f" ] && cp -a "$f" "$FW/"
+	[ -e "$f" ] && cp -L "$f" "$FW/"
 done
-[ -e /lib/firmware/regulatory.db.zst ] && cp -a /lib/firmware/regulatory.db* "$FW/" || true
+[ -e /lib/firmware/regulatory.db.zst ] && cp -L /lib/firmware/regulatory.db* "$FW/" || true
+
+for f in iwlwifi-8265-36.ucode.zst i915/kbl_dmc_ver1_04.bin.zst; do
+	[ -f "$FW/$f" ] && [ -s "$FW/$f" ] || { echo "firmware missing from image: $f" >&2; exit 1; }
+done
+links=$(find "$FW" -type l)
+[ -z "$links" ] || { echo "firmware symlinks left in image: $links" >&2; exit 1; }
 
 log "Installing NUC Display Lab files"
+for f in "$SRC"/rootfs/init "$SRC"/rootfs/etc/init.d/rcS "$SRC"/rootfs/usr/sbin/* "$SRC"/rootfs/usr/lib/nuclab/*.sh; do
+	busybox sh -n "$f" || { echo "BusyBox shell syntax error in ${f#$SRC/}" >&2; exit 1; }
+done
 cp -a "$SRC/rootfs/." "$ROOT/"
 mkdir -p "$ROOT/dev" "$ROOT/media/nuclab" "$ROOT/proc" "$ROOT/sys" "$ROOT/run" "$ROOT/tmp" "$ROOT/root" "$ROOT/var/log"
 mknod -m 600 "$ROOT/dev/console" c 5 1 2>/dev/null || true

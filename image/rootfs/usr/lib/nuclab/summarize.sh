@@ -24,7 +24,11 @@ summarize() {
 	echo "======================"
 	sed -n 's/^NUCLAB_VERSION=/Image version: /p; s/^NUCLAB_KERNEL=/Kernel:        /p' "$R/nuclab-release" 2>/dev/null
 	echo "Collected:     $(date -u +%Y-%m-%dT%H:%M:%SZ) (UTC, from the NUC clock)"
-	echo "System:        $(dmi sys_vendor) $(dmi product_name) $(dmi product_version)"
+	if [ -n "$(dmi product_name | tr -d ' ')" ]; then
+		echo "System:        $(dmi sys_vendor) $(dmi product_name) $(dmi product_version)"
+	else  # some NUC BIOSes leave the product fields blank
+		echo "System:        $(dmi board_vendor) $(dmi board_name) - board name, product name is blank"
+	fi
 	echo "Board:         $(dmi board_vendor) $(dmi board_name) $(dmi board_version)"
 	echo "BIOS:          $(dmi bios_version) ($(dmi bios_date))"
 	gpu=$(grep -E 'VGA|Display' "$R/lspci" 2>/dev/null | head -1 | sed 's/^[0-9a-f:.]* //')

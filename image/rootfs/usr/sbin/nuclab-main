@@ -145,6 +145,12 @@ survey() {
 survey
 hr
 if [ -n "$TEST" ]; then
+	# QEMU has no Intel GPU, but the module itself must still load (symbols,
+	# dependencies, firmware paths), otherwise real NUCs fall back to simpledrm.
+	for m in i915 iwlmvm e1000e; do
+		if modprobe "$m" 2>>"$LOG"; then echo "NUCLAB-MODULE-OK $m"
+		else echo "NUCLAB-MODULE-FAIL $m"; fi
+	done
 	echo "NUCLAB-TEST-DONE"
 	sleep 2; poweroff -f
 fi
