@@ -44,6 +44,13 @@ implementation compatible with the LibreELEC-yblod kernel and patch series.
   signaling explicitly notes missing documentation. That is evidence of an
   interface gap, not proof that Dolby output is impossible.
 
+## Update 2026-11-08: bridge confirmed
+
+Volunteer survey (nuclab-reports #6, NUC7i7BNB, BIOS 0093, LG OLED55C3 direct):
+`DP branch: OUI 00-60-ad dev-ID MC2800 HW-rev 2.2 SW-rev 1.77`, LSPCON on
+port B in PCON mode, HDR capable. Stage 3 work continues in
+`docs/MCDP2800-DV-PLAN.md`.
+
 ## Stage 1: hardware survey
 
 Deliver a shell collector with no third-party runtime requirement. Prefer
