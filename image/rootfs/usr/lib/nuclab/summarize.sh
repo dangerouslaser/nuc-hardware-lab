@@ -38,7 +38,7 @@ summarize() {
 	echo "Display converter (DP branch device)"
 	echo "------------------------------------"
 	NUCLAB_CHIP=""
-	branch=$(grep -E ': branch: OUI ' "$R/dmesg" 2>/dev/null | sed 's/^.*\] //' | sort -u)
+	branch=$(grep -E 'branch: OUI ' "$R/dmesg" 2>/dev/null | sed 's/^.*\] //' | sort -u)
 	if [ -n "$branch" ]; then
 		echo "$branch" | while IFS= read -r l; do
 			oui=$(echo "$l" | sed -n 's/.*OUI \([0-9a-fA-F-]*\).*/\1/p')
@@ -78,7 +78,7 @@ summarize() {
 			n++
 			id = ""
 			for (i = 0; i < 16; i++) { h = b[k, i]; if (h ~ /^[0-9a-f][0-9a-f]$/ && hex(h) >= 32 && hex(h) < 127) id = id sprintf("%c", hex(h)) }
-			if (b[k, 0] == "") continue
+			if (b[k, 0] == "" || b[k, 0] == "XX") continue  # no adaptor answered
 			printf "  %s\n    signature: \"%s\"\n", substr(k, 5), id
 			printf "    adaptor id: %s  OUI: %s-%s-%s  device id bytes: %s %s %s %s %s %s  hw: %s\n", \
 				b[k,16], b[k,17], b[k,18], b[k,19], b[k,20], b[k,21], b[k,22], b[k,23], b[k,24], b[k,25], b[k,26]

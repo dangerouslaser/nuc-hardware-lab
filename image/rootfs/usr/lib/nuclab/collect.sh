@@ -67,13 +67,15 @@ sleep 2
 		echo "enabled=$(cat "$c/enabled" 2>/dev/null)"
 		echo "connector_id=$(cat "$c/connector_id" 2>/dev/null)"
 		echo "modes=$(tr '\n' ' ' <"$c/modes" 2>/dev/null)"
-		if [ -s "$c/edid" ]; then
-			cat "$c/edid" >"$OUT/edid/$n.bin"
+		# sysfs reports size 0 for edid, so read it before testing the size.
+		cat "$c/edid" >"$OUT/edid/$n.bin" 2>/dev/null
+		if [ -s "$OUT/edid/$n.bin" ]; then
 			echo "edid_bytes=$(wc -c <"$OUT/edid/$n.bin")"
 			if command -v di-edid-decode >/dev/null; then
 				timeout 10 di-edid-decode "$OUT/edid/$n.bin" >"$OUT/edid/$n.txt" 2>&1
 			fi
 		else
+			rm -f "$OUT/edid/$n.bin"
 			echo "edid_bytes=0"
 		fi
 		echo
