@@ -1,0 +1,26 @@
+#!/bin/sh
+# One-time system setup. Nothing here touches internal disks.
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+
+mount -t proc proc /proc
+mount -t sysfs sysfs /sys
+mount -t devtmpfs devtmpfs /dev 2>/dev/null
+mkdir -p /dev/pts /dev/shm /run /tmp /media/nuclab /var/log
+mount -t devpts devpts /dev/pts
+mount -t tmpfs -o mode=0755 tmpfs /run
+mount -t tmpfs -o mode=1777 tmpfs /tmp
+mount -t debugfs debugfs /sys/kernel/debug 2>/dev/null
+echo /sbin/mdev >/proc/sys/kernel/hotplug 2>/dev/null
+hostname nuclab
+ip link set lo up
+
+# Load drivers for detected hardware. Repeat so that devices exposed by newly
+# loaded drivers (USB storage behind a hub, Wi-Fi behind PCI) are picked up.
+for pass in 1 2 3; do
+	find /sys/devices -name modalias -exec cat {} + 2>/dev/null | sort -u |
+		xargs -r modprobe -qab 2>/dev/null
+	sleep 1
+done
+modprobe -qa usb_storage uas sd_mod vfat nls_cp437 nls_iso8859_1 i2c_dev 2>/dev/null
+mdev -s

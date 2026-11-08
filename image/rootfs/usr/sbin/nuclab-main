@@ -1,0 +1,161 @@
+#!/bin/sh
+# NUC Display Lab survey: the program shown on screen after boot.
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+. /usr/lib/nuclab/net.sh
+LOG=/tmp/nuclab.log
+STICK=/media/nuclab
+TEST=""
+grep -qw 'nuclab.test=1' /proc/cmdline && TEST=1
+
+say() { printf '%s\n' "$*"; echo "$(date -u +%T) $*" >>"$LOG"; }
+hr() { echo "------------------------------------------------------------------"; }
+
+# ask VAR PROMPT : read one line with a timeout; empty when skipped.
+ask() {
+	if [ -n "$TEST" ]; then eval "$1=test"; return; fi
+	printf '%s\n> ' "$2"
+	IFS= read -r -t 180 ans || ans=""
+	eval "$1=\$ans"
+}
+
+conf_get() { # conf_get FILE KEY : KEY=value line, CRLF tolerant
+	sed -n "s/^$2=//p" "$1" 2>/dev/null | tr -d '\r' | tail -1
+}
+
+mount_stick() {
+	grep -q " $STICK " /proc/mounts && return 0
+	n=0
+	while [ $n -lt 20 ]; do
+		dev=$(findfs LABEL=NUCLAB 2>/dev/null) && break
+		mdev -s; sleep 1; n=$((n + 1))
+	done
+	[ -n "${dev:-}" ] || return 1
+	mount -t vfat -o rw,noatime,flush,umask=077 "$dev" "$STICK" 2>>"$LOG"
+}
+
+load_config() {
+	set -a
+	. /etc/nuclab.conf 2>/dev/null
+	set +a
+	if [ -f "$STICK/nuclab.conf" ]; then
+		tr -d '\r' <"$STICK/nuclab.conf" | grep -E '^[A-Z_]+=' >/tmp/stick.conf
+		set -a; . /tmp/stick.conf; set +a
+	fi
+}
+
+survey() {
+	clear
+	echo "=================================================================="
+	echo "  NUC Display Lab - display hardware survey"
+	echo "=================================================================="
+	echo
+	echo "This only reads information. It does not install anything or"
+	echo "change your internal drives. Leave the TV connected and switched on."
+	echo
+
+	if mount_stick; then say "USB stick found; a copy of the report will be saved on it."
+	else say "Could not find the NUCLAB USB stick; the report will only be uploaded."; fi
+	load_config
+	net_wired_start
+
+	if [ -z "$TEST" ]; then
+		hr
+		echo "Three optional questions (press Enter to skip any of them)."
+		hr
+	fi
+	ask a_tv   "1/3  TV make and model (e.g. LG OLED65C1):"
+	ask a_path "2/3  Is the NUC's HDMI port plugged straight into the TV? If not, what is in between (receiver, switch, adapter)?"
+	ask a_more "3/3  Anything else? (TV input used, cable, problems seen):"
+
+	ts=$(date -u +%Y%m%d-%H%M%S)
+	prod=$(cat /sys/class/dmi/id/product_name 2>/dev/null | tr -c 'A-Za-z0-9._-' '_' | cut -c1-24)
+	id="$ts-${prod:-unknown}-$(head -c 3 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+	R=/tmp/report/nuclab-$id
+	rm -rf /tmp/report; mkdir -p "$R"
+	{
+		echo "TV: $a_tv"
+		echo "Connection: $a_path"
+		echo "Notes: $a_more"
+	} >"$R/answers.txt"
+
+	echo
+	say "Collecting display information (about 15 seconds)..."
+	/usr/lib/nuclab/collect.sh "$R" >>"$LOG" 2>&1
+	A=/tmp/report/nuclab-$id.tar.gz
+	(cd /tmp/report && tar czf "$A" "nuclab-$id")
+
+	if grep -q " $STICK " /proc/mounts; then
+		mkdir -p "$STICK/reports"
+		cp "$A" "$STICK/reports/" && cp "$R/summary.txt" "$STICK/reports/nuclab-$id-summary.txt"
+		sync
+		say "Saved to the USB stick: reports/nuclab-$id.tar.gz"
+	fi
+
+	clear
+	cat "$R/summary.txt"
+	hr
+
+	# --- network --------------------------------------------------------
+	say "Connecting to the internet..."
+	if ! net_wait 25; then
+		ssid=$(conf_get "$STICK/wifi.txt" SSID)
+		pass=$(conf_get "$STICK/wifi.txt" PASSWORD)
+		if [ -z "$ssid" ] && [ -z "$TEST" ] && net_wifi_iface >/dev/null; then
+			echo "No wired connection. Enter your Wi-Fi name to use Wi-Fi instead,"
+			echo "or just press Enter to skip uploading."
+			ask ssid "Wi-Fi name:"
+			[ -n "$ssid" ] && { printf 'Wi-Fi password: '; stty -echo 2>/dev/null; IFS= read -r pass; stty echo 2>/dev/null; echo; }
+		fi
+		if [ -n "$ssid" ]; then
+			say "Joining Wi-Fi network '$ssid'..."
+			net_wifi_start "$ssid" "$pass"
+			net_wait 40
+		fi
+	fi
+
+	if net_online; then
+		net_sync_clock
+		if [ -z "$TEST" ]; then
+			echo "Uploading the report in 10 seconds. Type n and press Enter to cancel."
+			IFS= read -r -t 10 c; case $c in n|N|no|NO) c=skip ;; esac
+		fi
+		if [ "${c:-}" = skip ]; then
+			say "Upload cancelled."
+		else
+			say "Uploading..."
+			if /usr/lib/nuclab/upload.sh "$A" "$R" /tmp/upload.result 2>>"$LOG"; then
+				. /tmp/upload.result
+				say "UPLOAD OK"
+				[ -n "$ISSUE_URL" ] && say "  Report:  $ISSUE_URL"
+				[ -n "$ARCHIVE_URL" ] && [ -z "$ISSUE_URL" ] && say "  Archive: $ARCHIVE_URL"
+				[ -n "$NTFY_OK" ] && say "  The project owner has been notified."
+			else
+				say "UPLOAD FAILED (details: Alt+F3). The copy on the USB stick is enough:"
+				say "please send reports/nuclab-$id.tar.gz from the stick instead."
+			fi
+		fi
+	else
+		say "No internet connection. Please send the file reports/nuclab-$id.tar.gz"
+		say "from the USB stick (plug it into any computer) to the project owner."
+	fi
+	sync
+}
+
+survey
+hr
+if [ -n "$TEST" ]; then
+	echo "NUCLAB-TEST-DONE"
+	sleep 2; poweroff -f
+fi
+while true; do
+	echo
+	echo "Done. Thank you!   [P] power off   [R] run again   [S] shell"
+	printf '> '
+	IFS= read -r k
+	case $k in
+	p|P|"") sync; umount "$STICK" 2>/dev/null; poweroff ;;
+	r|R) survey; hr ;;
+	s|S) /bin/sh ;;
+	esac
+done

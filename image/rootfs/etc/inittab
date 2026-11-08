@@ -1,0 +1,6 @@
+::sysinit:/etc/init.d/rcS
+::respawn:/usr/sbin/nuclab-main
+tty2::askfirst:-/bin/sh
+tty3::respawn:/usr/sbin/nuclab-logview
+::ctrlaltdel:/sbin/reboot
+::shutdown:/usr/lib/nuclab/shutdown.sh

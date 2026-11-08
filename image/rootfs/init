@@ -1,0 +1,3 @@
+#!/bin/sh
+# PID 1 in the initramfs: hand over to busybox init (see /etc/inittab).
+exec /sbin/init

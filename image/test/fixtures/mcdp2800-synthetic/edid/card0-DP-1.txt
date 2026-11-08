@@ -1,0 +1,4 @@
+  Display Product Name: 'LG TV SSCR2'
+  Manufacturer: GSM
+  Dolby Vision
+  HDR Static Metadata Data Block:

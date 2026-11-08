@@ -1,0 +1,3 @@
+TV: LG C1
+Connection: direct
+Notes: 

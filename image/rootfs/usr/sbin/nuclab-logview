@@ -1,0 +1,4 @@
+#!/bin/sh
+# Alt+F3: live log of the survey, for debugging.
+touch /tmp/nuclab.log
+exec tail -n 200 -f /tmp/nuclab.log

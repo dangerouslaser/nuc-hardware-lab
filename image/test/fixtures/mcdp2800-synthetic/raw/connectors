@@ -1,0 +1,8 @@
+[card0-DP-1]
+status=connected
+edid_bytes=256
+
+[card0-DP-2]
+status=disconnected
+edid_bytes=0
+

@@ -1,0 +1,6 @@
+[    0.000000] SYNTHETIC FIXTURE - not from real hardware
+[    3.120001] i915 0000:00:02.0: [drm:intel_dp_init_connector [i915]] Adding DP connector on [ENCODER:94:DDI B/PHY B]
+[    3.130002] i915 0000:00:02.0: [drm:drm_dp_dump_desc [drm_display_helper]] AUX B/DDI B/PHY B: branch: OUI 00-60-ad dev-ID MC2800 HW-rev 2.2 SW-rev 1.66 quirks 0x0000
+[    3.130003] i915 0000:00:02.0: [drm:lspcon_detect_vendor [i915]] Vendor: Mega Chips
+[    3.130004] i915 0000:00:02.0: [drm:intel_lspcon_init [i915]] Success: LSPCON init
+[    9.000005] i915 0000:00:02.0: [drm:drm_dp_dump_desc [drm_display_helper]] AUX B/DDI B/PHY B: branch: OUI 00-60-ad dev-ID MC2800 HW-rev 2.2 SW-rev 1.66 quirks 0x0000

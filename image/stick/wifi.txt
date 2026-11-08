@@ -1,0 +1,5 @@
+# Optional: Wi-Fi details, only needed if the NUC has no network cable.
+# Fill in both lines (leave PASSWORD empty for an open network) and save.
+# You can also type them on screen when asked instead.
+SSID=
+PASSWORD=
