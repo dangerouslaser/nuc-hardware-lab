@@ -121,6 +121,36 @@ on AUX B (0x20 TMDS output disable, 0x41 LSPCON current mode) and
 (USB-C) also has an HDMI connector, so `video=` names both HDMI-A-1 and
 HDMI-A-2.
 
+**Result (report #15, v0.3.1):** the LS round worked end to end. Mode 2
+first try, levels 8/8, Dolby Vision logo and correct test bars for
+`dv-ref`, and the same for `dv-bad`, so the negative control does not
+discriminate on the C3. Back to PCON fine. See
+`docs/MCDP2800-DV-PLAN.md` §10 (what is shown) and §11 (next round draft).
+
+## v0.4.0: LS round 3, metadata integrity (plan section 11)
+
+Same kernel and lab patch as v0.3.x. One rebind into LS mode (mode 2 first),
+then six steps at 4K23.976 RGB8:
+
+| Step | Frame | VSIF | Expected if the metadata is used |
+|---|---|---|---|
+| LS-levels | levels pattern | no | 8/8 and 8/8 |
+| LS-NOVSIF | `dv-ref` | no | no logo, green/purple noise |
+| LS-DV-A | `dv-ref` | yes | logo, test bars |
+| LS-DV-B | `dv-dmb` | yes | logo, test bars, clearly **darker** than DV-A |
+| LS-DV-A2 | `dv-ref` | yes | logo, **brighter** again |
+| LS-NEG | `dv-bad` | yes | recorded only; the C3 showed DV for it in v0.3.1 |
+
+`dv-dmb` is `dv-ref`'s base layer with a different RPU
+(`refclip-gen-dmb.json`: L1 `max_pq` 4095, `avg_pq` 3600, instead of
+3079/1900). The two frames differ in 87 pixels of row 0, the tunnel's
+metadata packets, and nowhere else, so any brightness change comes from the
+TV reading the metadata. `make-frames.sh` reproduced `dv-ref` and `dv-bad`
+byte for byte before adding `dv-dmb`. The plan's §11.1 owner check on the
+IT11 + G5 was **not** done before this release, so a "same" answer for DV-B
+is inconclusive until the G5 shows the difference. DV-B and DV-A2 add the
+question `bright_vs_prev=` (d/b/s/?) to `answers.txt`.
+
 ## The LG C3's EDID (plan section 6.1)
 
 The EDID was already in the first report (`raw/modetest`, connector DP-1, 256

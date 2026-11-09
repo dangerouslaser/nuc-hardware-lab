@@ -6,7 +6,34 @@ Written 2026-11-08 after the first successful volunteer survey. Read
 `PLAN.md` (Stage 3) in this repository first; this document replaces its
 open questions with what we now know and turns them into experiments.
 
-## Status (2026-11-08)
+## Status (2026-11-09)
+
+- **Result (report #15, 2026-11-09, v0.3.1-dvlab): DV recognised through
+  the MCDP2800 in level-shifter (LS) mode.** This supersedes the "DV stays
+  off LSPCON routes" conclusion below for the LS route only; the PCON route
+  is still H4. Details and the open questions are in §10, the next round in
+  §11.
+  - The LS switch went through the standard dual-mode register over AUX
+    (I2C 0x40: `0x40/0x41` read `01/01` in PCON mode, `00/00` in LS mode,
+    `0x20 = 00` TMDS output on). The EDID came over the LSPCON's
+    I2C-over-AUX bridge (lab mode 2), first try.
+  - 4K23.976 RGB8 full range (296.7 MHz TMDS) on `HDMI-A-1` / DDI B, with
+    the GPU's own AVI and the Dolby VSIF (`Vendor, length 27, Dolby:
+    signal 1`) in the native-HDMI layout.
+  - Levels: 8/8 near-black and 8/8 near-white squares (full range correct).
+    DV reference: Dolby Vision logo, picture = test bars, i.e. the TV
+    decoded the RGB8 tunnel, so the pixel bytes survived the LS repeater.
+  - **The negative control did not discriminate:** `dv-bad` (every
+    metadata CRC broken) also gave the logo and test bars. The C3 appears
+    to enter DV on the VSIF alone and to render the tunnel with fallback
+    metadata. So recognition and pixel transport are shown; metadata
+    integrity is **not** (§8: a DV badge is not transport correctness).
+  - Back to PCON by rebind: HBR2 x4 link training passed, registers back
+    to `01/01`, volunteer confirmed a normal screen. Each rebind took about
+    8-9 s.
+  - v0.3.0's "No Signal" (no report survived) is not explained. v0.3.0
+    tried GMBUS DDC (mode 1) first; v0.3.1 tried mode 2 first and added
+    `video=` and a framebuffer wait, so any of these may be the fix.
 
 - §6.1 done without a volunteer run: the C3's EDID is in report #6
   (`raw/modetest`). The port's `dvbridge_parse_edid()` returns
@@ -19,7 +46,7 @@ open questions with what we now know and turns them into experiments.
 - §5: the lab patch, `dvprobe`, the reference and negative frames and the
   `dvlab` image variant are in `image/dvlab/` and `image/rootfs`.
 
-- **Result (report #8, 2026-11-08): H4.** C1 and C2 pass (full range
+- **Result (report #8, 2026-11-08): H4 for the PCON route.** C1 and C2 pass (full range
   correct; the HDR logo shows, so the GMP SDP is forwarded). H1, H1b and H2
   give no Dolby Vision, and the negative control behaves the same. The DP RX
   CRC equals the framebuffer CRC in every step, and the readback confirms the
@@ -273,3 +300,133 @@ time on this iGPU is unproven; do not advertise it until measured.
 - intel-gfx thread on LSPCON 3D/VSIF, 2026-10-19:
   https://www.mail-archive.com/intel-gfx@lists.freedesktop.org/msg386211.html
   and msg386214.
+
+## 10. The level-shifter route: what is shown and what is open
+
+Evidence: report #15 (issue #15 in `dangerouslaser/nuclab-reports`,
+`sh image/tools/get-report.sh 15`), files `dvlab/answers.txt`,
+`dvlab/progress.txt`, `dvlab/state.txt` (dual-mode registers and
+`i915_display_info` per snapshot), `dvlab/dvprobe.log`, `raw/dmesg`.
+
+Per §4's evidence classes:
+
+| Class | Status on the LS route |
+|---|---|
+| DV recognition | **Shown** (logo, DV picture), but the TV also shows it for broken metadata |
+| Pixel transport | **Shown** by the decoded test bars; no CRC check (the LSPCON has no DP RX in LS mode, so the PCON round's DP_TEST_CRC check does not apply) |
+| Metadata integrity | **Open**: the negative control gave the same result |
+| Lifecycle | Partly shown: DV → SDR → DV across steps, LS → PCON restore. TV off/on, suspend/resume not tested |
+| Playback | Not started |
+
+The two `DVBridge: scanout rejected ... stage=crtc reasons=0x20` errors at
+169+24 s and 222+24 s are not a problem: bit 5 at the `crtc` stage is "a
+plane other than the primary is on the CRTC" (`linux-9903-diagnostics`).
+Both are dvprobe's end-of-step restore while DV is still set. The guard
+refuses that commit and the next one turns DV off. No rejection during a
+hold.
+
+Limits of this route, from the MCDP28x0 datasheet (Rev B) and i915:
+
+- LS mode repeats AC-coupled TMDS up to 340 Mchar/s (HDMI 1.4b); gen9 HDMI
+  stops at 300 MHz. So 4K up to 30 Hz: fine for 4K23.976 film, not for a
+  4K60 UI.
+- No HDR10 in LS mode on gen9: there is no DRM InfoFrame DIP in HDMI mode.
+  HDR10 stays on the PCON route (C2 in report #8).
+- The datasheet has no register map. The only mode switch used is the
+  standard dual-mode register, which i915 already writes for PCON mode.
+
+Product design question for the port (not for the volunteer): DV playback
+needs LS mode, while the 4K60 UI and HDR10 need PCON mode. Today the lab
+switches by rebinding i915, which swaps the connector (`DP-1` ↔ `HDMI-A-1`).
+A release needs a switch at modeset time on one connector. Options to
+assess in the port tree: (a) one DP connector whose LSPCON encoder computes
+an HDMI-mode config when the DV property is set; (b) both connectors kept
+registered with the inactive one reporting disconnected, plus a hotplug on
+switch (Kodi would see an output change on every DV title). (a) is cleaner
+and needs the most i915 work; decide only after §11 shows metadata
+integrity.
+
+## 11. Next round: v0.4.0-dvlab, NUC7 LS round 2
+
+Released 2026-11-09 as `v0.4.0-dvlab` (steps 1-6 of 11.3; the optional
+hotplug step and the picture-mode question are not in it). §11.1 was
+skipped at the owner's request: neither `dv-bad` nor the A/B pair has been
+checked on the G5, so read a "same" answer for DV-B as inconclusive, not as
+a failure. `dv-dmb` uses only the L1 change; the L2 fallback was not built.
+
+Goal: settle metadata integrity on the LS route with one more volunteer
+boot, and keep it shorter than v0.3.1. Same kernel and lab patch; only
+frames, `dvlab.sh` steps and questions change, unless noted.
+
+### 11.1 Owner pre-work (no volunteer time)
+
+On the IT11 + LG G5 over native HDMI with the port's own lab path:
+
+1. Show `dv-bad`. If the G5 also shows DV with test bars, LG sets accept
+   broken metadata and `dv-bad` is useless as a control on LG; keep it in
+   the run only for the record. Write the answer down either way.
+2. Build the metadata A/B frames (11.2) and check the difference is obvious
+   on the G5 in a side-by-side photo. Do not ship them otherwise.
+3. `tunnelcheck.py check` must report valid packets for every new frame.
+
+### 11.2 New frames
+
+Same picture (testsrc2 plus a grey ramp and a bright-highlight patch, from
+`make-frames.sh`), two valid RPUs from `refclip-gen.json` variants that
+differ only in display-management metadata, chosen so that a TV that reads
+the metadata must render them differently:
+
+- `dv-dm-a`: L1 `max_pq` matching the content (as `dv-ref`).
+- `dv-dm-b`: L1 `max_pq = 4095` (10,000 nits) and `avg_pq` raised, so the
+  TV's tone mapping compresses the highlights hard: a visibly darker,
+  flatter picture.
+
+If the G5 does not show an obvious difference, try L2 trims (large
+`trim_offset`/`trim_slope`) at the C3/G5 target before giving up on this
+check. Add both frames to `frames.sha256`.
+
+### 11.3 Steps (all in LS mode 2, 4K23.976 RGB8)
+
+Rebind once into LS mode (mode 2 only; mode 1 only if mode 2 brings up no
+connector), then:
+
+1. **LS-levels** as before (full-range control, short).
+2. **NOVSIF:** `dv-ref` with `--dv` off (no VSIF). Expected: no logo,
+   green/purple noise. Proves the VSIF is what switches the TV, and that
+   step 3's bars are DV decoding, not the TV guessing.
+3. **DV-A:** `dv-dm-a` with the VSIF. Expected: logo, normal bars.
+4. **DV-B:** `dv-dm-b` with the VSIF. Question: "Compared with the last
+   picture, was this one darker / brighter / the same?" plus a photo
+   request. Darker = the TV used the metadata (integrity shown, given
+   `tunnelcheck` validated both frames).
+5. **DV-A again:** confirms the change follows the frame, not elapsed time
+   or a TV setting.
+6. **NEG:** `dv-bad`, kept for comparison with the owner's G5 result.
+7. **Hotplug (optional, asked first):** with DV-A shown, "switch the TV off
+   and on with its remote"; then ask whether DV came back. Needs the LS
+   port's HDMI hotplug path, which the lab patch leaves enabled
+   (`hpd_pulse` is only removed for DP).
+
+Then rebind to PCON as now. Per step ask, besides the existing questions,
+which picture mode the TV lists (LG: the picture mode menu shows "Dolby
+Vision ..." names), since the corner logo can be missed.
+
+### 11.4 Script and harness changes
+
+- `dvlab.sh`: new `step` arguments for "no VSIF" and relative-brightness
+  questions; drop the mode-1-first path; keep the live copy on the stick.
+- `dvprobe`: no change (`--dv` already selects the VSIF; omitting it gives
+  the NOVSIF step).
+- `make-frames.sh` / `refclip-gen.json`: the two DM variants.
+- Report: `answers.txt` gains `brightness_vs_prev=` per step.
+
+### 11.5 Decision after the round
+
+- DV-B visibly darker, DV-A again back to normal, NOVSIF noisy: metadata
+  integrity shown on the LS route. Proceed to the §10 design question and
+  a product patch (replacing §7, which assumed a PCON-route VSIF).
+- No difference between A and B, but the G5 showed one: the LS route
+  carries the picture but the C3 is not using the metadata as sent; stop
+  and investigate before any product work.
+- NOVSIF also shows a logo: something else is sending a Dolby VSIF; check
+  `infoframes enabled` in the dump for that step before anything else.

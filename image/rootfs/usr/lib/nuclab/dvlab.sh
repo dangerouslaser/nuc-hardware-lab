@@ -197,7 +197,8 @@ rec "route=$ROUTE"
 echo "Unpacking test pictures..."
 zstd -dqf "$SHARE/dv-ref.xrgb.zst" -o /tmp/dv-ref.xrgb
 zstd -dqf "$SHARE/dv-bad.xrgb.zst" -o /tmp/dv-bad.xrgb
-(cd /tmp && sha256sum dv-ref.xrgb dv-bad.xrgb) >"$OUT/frames.sha256"
+zstd -dqf "$SHARE/dv-dmb.xrgb.zst" -o /tmp/dv-dmb.xrgb 2>/dev/null
+(cd /tmp && sha256sum dv-ref.xrgb dv-bad.xrgb dv-dmb.xrgb) >"$OUT/frames.sha256" 2>&1
 snapshot initial
 
 # --- converter (PCON) round: Dolby VSIF as DP InfoFrame SDPs ---------------
@@ -295,12 +296,12 @@ fi
 clear
 cat <<'EOF'
 ==================================================================
-  Display experiments, round 2 (about 10 minutes)
+  Display experiments, round 3 (about 10 minutes)
 ==================================================================
 
 This round switches the NUC's HDMI chip into a different mode. While it
-switches, the screen goes BLACK for up to a minute, maybe twice. That is
-expected. Please do not press anything during a black screen.
+switches, the TV may say "No Signal" or stay BLACK for up to a minute,
+maybe twice. That is expected. Please do not press anything then.
 
 If the screen stays black, just wait: the NUC tries a second way and
 then switches back by itself, which can take up to 6 minutes. If it is
@@ -310,9 +311,11 @@ power off (hold the power button, then switch on again). If you do have
 to switch it off, the notes so far are already on the USB stick: please
 send the folder reports/nuclab-...-dvlab from the stick.
 
-As before, the TV then shows a test picture a few times for about 25
+As before, the TV then shows a test picture six times for about 25
 seconds each, and this screen asks what you saw. Watch the top-right
 corner for a "Dolby Vision" logo; photos with the step number help.
+Twice you will also be asked whether the picture was darker or brighter
+than the one before, so keep the room lighting the same if you can.
 EOF
 hr
 wait_enter "Press Enter when you are ready."
@@ -356,13 +359,14 @@ done
 rec "ls_mode=${MODE:-none}"
 
 N=0
-# step NAME FRAME DV : one HDMI-A experiment in LS mode.
+# step NAME FRAME DV [cmp] : one HDMI-A experiment in LS mode. DV=0 sends
+# no Dolby VSIF. cmp: also ask how bright it was compared with the last one.
 step() {
 	N=$((N + 1))
-	name=$1 frame=$2 dv=$3
+	name=$1 frame=$2 dv=$3 cmp=${4:-}
 	clear
 	echo "=================================================================="
-	echo "  Step $N of 3   ($name)"
+	echo "  Step $N of $NSTEPS   ($name)"
 	echo "=================================================================="
 	case $frame in
 	levels) echo "You will see: a black band with dim grey squares, a grey band,"
@@ -370,11 +374,17 @@ step() {
 	*) echo "You will see: either colour test bars, or a mostly green/purple"
 	   echo "noisy picture. Either is fine; we only want to know which." ;;
 	esac
+	if [ -n "$cmp" ]; then
+		echo
+		echo "This time, also watch how BRIGHT the picture is: you will be asked"
+		echo "whether it is darker, brighter or the same as the previous one."
+		echo "A phone photo with the same camera position as before helps a lot."
+	fi
 	echo
 	echo "Note the step number ($N) for any photo."
 	wait_enter "Press Enter to start step $N."
 	echo "Showing the test picture (about 25 seconds)..."
-	echo "=== step $N $name frame=$frame dv=$dv" >>"$LOG"
+	echo "=== step $N $name frame=$frame dv=$dv cmp=${cmp:--}" >>"$LOG"
 	if [ "$frame" = levels ]; then src="--pattern levels"; else src="--frame /tmp/$frame.xrgb"; fi
 	extra=""
 	[ "$dv" = 1 ] && extra="--dv"
@@ -394,19 +404,35 @@ step() {
 		ask q2 "What did the picture look like? (1 = colour test bars, 2 = green/purple or noisy, 3 = black / no signal / flashing, ? = not sure)" "1 2 3 ?"
 		q3=-
 	fi
+	bright=-
+	if [ -n "$cmp" ]; then
+		ask bright "Compared with the PREVIOUS test picture, was this one darker, brighter, or the same? (d = darker, b = brighter, s = same, ? = not sure)" "d b s ?"
+	fi
 	ask q4 "Was anything else odd (flicker, picture dropped out, TV message)? (y/n)" "y n ?"
 	notes=""
 	if [ "$q4" = y ] && [ -z "$TEST" ]; then
 		printf 'Briefly, what happened?\n> '
 		IFS= read -r -t 300 notes || notes=""
 	fi
-	rec "step=$N name=$name frame=$frame dv=$dv mode=$MODE rc=$rc logo=$q1 picture=$q2 q3=$q3 odd=$q4 note=$notes"
+	rec "step=$N name=$name frame=$frame dv=$dv bright_vs_prev=$bright mode=$MODE rc=$rc logo=$q1 picture=$q2 q3=$q3 odd=$q4 note=$notes"
 	progress "step $N $name done"
 }
 
+# Round 3 (plan §11): NOVSIF proves the VSIF is what switches the TV; DV-A /
+# DV-B / DV-A differ only in the metadata (identical pictures), so a darker
+# DV-B that goes back to normal for DV-A shows the TV uses the metadata.
+NSTEPS=6
+[ -s /tmp/dv-dmb.xrgb ] || NSTEPS=4
 if [ -n "$MODE" ]; then
 	step LS-levels levels 0
-	step LS-DV dv-ref 1
+	step LS-NOVSIF dv-ref 0
+	step LS-DV-A dv-ref 1
+	if [ -s /tmp/dv-dmb.xrgb ]; then
+		step LS-DV-B dv-dmb 1 cmp
+		step LS-DV-A2 dv-ref 1 cmp
+	else
+		note "dv-dmb frame missing; skipping the metadata A/B steps"
+	fi
 	step LS-NEG dv-bad 1
 	snapshot ls-after-steps
 fi

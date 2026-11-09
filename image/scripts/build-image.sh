@@ -21,7 +21,7 @@ apk add -q --no-progress linux-firmware-i915 linux-firmware-intel \
 	ukify systemd-efistub kmod cpio zstd dosfstools mtools sfdisk \
 	python3 binutils gzip >/dev/null
 if [ "$VARIANT" = dvlab ]; then
-	for f in nuclab-dvlab-kernel.tar.gz dv-ref.xrgb.zst dv-bad.xrgb.zst; do
+	for f in nuclab-dvlab-kernel.tar.gz dv-ref.xrgb.zst dv-bad.xrgb.zst dv-dmb.xrgb.zst; do
 		[ -s "$DVLAB/$f" ] || { echo "missing $DVLAB/$f (see image/dvlab/README.md)" >&2; exit 1; }
 	done
 	mkdir -p /tmp/k && tar -C /tmp/k -xzf "$DVLAB/nuclab-dvlab-kernel.tar.gz"
@@ -145,7 +145,8 @@ if [ "$VARIANT" = dvlab ]; then
 		$(pkg-config --cflags --libs libdrm)
 	strip "$ROOT/usr/bin/dvprobe"
 	mkdir -p "$ROOT/usr/share/nuclab"
-	cp "$DVLAB/dv-ref.xrgb.zst" "$DVLAB/dv-bad.xrgb.zst" "$ROOT/usr/share/nuclab/"
+	cp "$DVLAB/dv-ref.xrgb.zst" "$DVLAB/dv-bad.xrgb.zst" "$DVLAB/dv-dmb.xrgb.zst" \
+		"$ROOT/usr/share/nuclab/"
 	cp "$SRC/dvlab/frames.sha256" "$ROOT/usr/share/nuclab/"
 else
 	rm -f "$ROOT/usr/lib/nuclab/dvlab.sh"
