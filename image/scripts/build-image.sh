@@ -184,7 +184,13 @@ ls -lh "$W/initramfs.zst"
 log "Building unified kernel image"
 CMDLINE="rdinit=/init console=tty1 quiet loglevel=3 fbcon=font:TER16x32 drm.debug=0x4 log_buf_len=64M"
 # qms=0: the yblod QMS VTEM is 36 bytes, gen9's GMP DIP is 32 (lab only).
-[ "$VARIANT" = dvlab ] && CMDLINE="$CMDLINE i915.lspcon_dv_lab=1 i915.qms=0"
+# video=: the console on the level-shifter round's HDMI-A connector runs at
+# 1080p60 (148.5 MHz TMDS), well inside the MCDP2800's 340 MHz LS limit,
+# instead of the TV's preferred mode. PCON mode (DP-1) is unaffected. Both
+# names, because the NUC7's USB-C port (DDI C) also has an HDMI connector and
+# port B's may come up as either.
+[ "$VARIANT" = dvlab ] &&
+	CMDLINE="$CMDLINE i915.lspcon_dv_lab=1 i915.qms=0 video=HDMI-A-1:1920x1080@60 video=HDMI-A-2:1920x1080@60"
 ukify build --linux "$VMLINUZ" --initrd "$W/initramfs.zst" \
 	--cmdline "$CMDLINE" --uname "$KVER" --os-release "@$ROOT/etc/os-release" \
 	--output "$W/BOOTX64.EFI" >/dev/null

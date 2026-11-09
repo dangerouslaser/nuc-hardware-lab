@@ -97,7 +97,13 @@ survey() {
 	} >"$R/answers.txt"
 
 	if [ -n "$want_dv" ]; then
-		/usr/lib/nuclab/dvlab.sh "$R/dvlab" 2>>"$LOG"
+		# A live copy on the stick survives a forced power-off.
+		live=""
+		if grep -q " $STICK " /proc/mounts; then
+			live=$STICK/reports/nuclab-$id-dvlab
+			mkdir -p "$live" 2>>"$LOG" || live=""
+		fi
+		/usr/lib/nuclab/dvlab.sh "$R/dvlab" "$live" 2>>"$LOG"
 		echo "dvlab exit $?" >>"$LOG"
 	fi
 

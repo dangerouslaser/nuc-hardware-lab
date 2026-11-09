@@ -4,13 +4,18 @@
 # the Dolby VSIF) reach the TV. v0.2.0-dvlab showed the PCON route drops the
 # Dolby VSIF (reports #8/#9); see docs/MCDP2800-DV-PLAN.md.
 #
-#   dvlab.sh OUTDIR
+#   dvlab.sh OUTDIR [LIVEDIR]
 #
 # Interactive, only when the volunteer picks it. The switch to LS mode is
-# i915.lspcon_ls_lab=1 (then 2) + an i915 unbind/bind; if the volunteer
+# i915.lspcon_ls_lab=2 (then 1) + an i915 unbind/bind; if the volunteer
 # cannot see the screen afterwards, it switches back by itself.
+#
+# LIVEDIR (on the USB stick) gets a copy of OUTDIR and the kernel log every
+# few seconds and at each checkpoint, so a volunteer who has to hold the
+# power button during a black screen still leaves evidence (v0.3.0 lost it).
 PATH=/usr/sbin:/usr/bin:/sbin:/bin
-OUT=${1:?usage: dvlab.sh OUTDIR}
+OUT=${1:?usage: dvlab.sh OUTDIR [LIVEDIR]}
+LIVE=${2:-}
 SHARE=/usr/share/nuclab
 PARAM=/sys/module/i915/parameters/lspcon_ls_lab
 TEST=""
@@ -45,6 +50,30 @@ wait_enter() {
 
 mount -t debugfs none /sys/kernel/debug 2>/dev/null
 
+# save_live [tail] : copy the results so far and the kernel log to the stick.
+save_live() {
+	[ -n "$LIVE" ] || return 0
+	mkdir -p "$LIVE" 2>/dev/null || return 0
+	cp -f "$OUT"/* "$LIVE"/ 2>/dev/null
+	if [ "${1:-}" = tail ]; then
+		dmesg 2>/dev/null | tail -n 4000 >"$LIVE/dmesg-tail.txt"
+	else
+		dmesg >"$LIVE/dmesg.txt" 2>/dev/null
+	fi
+	sync
+}
+SAVER=""
+if [ -n "$LIVE" ]; then
+	echo "dvlab started $(date -u +%FT%TZ)" >"$OUT/progress.txt"
+	save_live
+	# Runs in its own process, so it keeps saving while the main script is
+	# stuck in an unbind/bind.
+	(while :; do sleep 10; save_live tail; done) </dev/null >/dev/null 2>&1 &
+	SAVER=$!
+	trap '[ -n "$SAVER" ] && kill "$SAVER" 2>/dev/null; echo "dvlab ended $(date -u +%FT%TZ)" >>"$OUT/progress.txt"; save_live' EXIT
+fi
+progress() { echo "$(date -u +%T) $*" >>"$OUT/progress.txt"; save_live; }
+
 i915_pci() {
 	for d in /sys/bus/pci/drivers/i915/0000:*; do
 		[ -e "$d" ] && { basename "$d"; return; }
@@ -65,7 +94,18 @@ snapshot() { # snapshot TAG : connector state into the report
 		done
 		modetest -c 2>/dev/null | grep -E '^[0-9]+\s|3840x2160|1920x1080' | head -40
 		dmesg | grep -iE 'LSPCON|dual mode|DVBridge' | tail -20
+		# Read-only, the reads drm_lspcon_get_mode() does: 0x20 = TMDS
+		# output disable (bit 0), 0x41 = LSPCON current mode (bit 0: PCON).
+		for bus in /sys/bus/i2c/devices/i2c-*; do
+			grep -q 'AUX B' "$bus/name" 2>/dev/null || continue
+			echo "--- dual-mode 0x40 on ${bus##*/} ($(cat "$bus/name"))"
+			timeout 10 i2cdump -y -r 0x00-0x4f "${bus##*/i2c-}" 0x40 b 2>&1
+		done
+		# Which pipe drives which port, at what clock ("No Signal" check).
+		DRI=$(dri_dir)
+		[ -n "$DRI" ] && echo "--- i915_display_info" && cat "$DRI/i915_display_info"
 	} >>"$OUT/state.txt" 2>&1
+	progress "snapshot $1"
 }
 
 PCI=$(i915_pci)
@@ -75,8 +115,16 @@ fbcon_vtcon() { # the vtconsole bound to the framebuffer console
 	done
 }
 
+drm_fb() { # an i915 framebuffer (i915drmfb / inteldrmfb) is registered
+	for f in /sys/class/graphics/fb*/name; do
+		grep -qi drmfb "$f" 2>/dev/null && return 0
+	done
+	return 1
+}
+
 rebind() { # rebind MODE : set lspcon_ls_lab and re-probe i915
 	note "rebind lspcon_ls_lab=$1 pci=$PCI"
+	progress "rebind $1 start"
 	echo "$1" >"$PARAM" || return 1
 	# As igt core_hotunplug: release the console before unbinding.
 	VT=$(fbcon_vtcon)
@@ -92,10 +140,17 @@ rebind() { # rebind MODE : set lspcon_ls_lab and re-probe i915
 		sleep 3
 	fi
 	[ -e "/sys/bus/pci/drivers/i915/$PCI" ] || note "i915 NOT bound after retry"
+	# Rebind the console only once i915's framebuffer exists again; a fixed
+	# sleep could rebind it too early and leave the screen black.
+	n=0
+	while ! drm_fb && [ $n -lt 30 ]; do sleep 1; n=$((n + 1)); done
+	if drm_fb; then note "framebuffer back after ${n}s: $(cat /sys/class/graphics/fb*/name 2>/dev/null | tr '\n' ' ')"
+	else note "no i915 framebuffer after ${n}s"; fi
 	dmesg | tail -50 >>"$LOG"
 	VT=$(fbcon_vtcon)
 	[ -n "$VT" ] && echo 1 >"$VT/bind" 2>>"$LOG"
-	note "rebind done: $(dmesg | grep 'LSPCON LS lab' | tail -1)"
+	note "rebind done: vtcon=${VT:-none} bind=$(cat "$VT/bind" 2>/dev/null) $(dmesg | grep 'LSPCON LS lab' | tail -1)"
+	progress "rebind $1 done"
 }
 
 hdmi_connected() { # wait up to $1 s for a connected HDMI-A connector
@@ -251,7 +306,9 @@ If the screen stays black, just wait: the NUC tries a second way and
 then switches back by itself, which can take up to 6 minutes. If it is
 still black after 10 minutes, hold the power button to switch it off.
 Nothing is changed permanently: the chip returns to normal after a full
-power off (hold the power button, then switch on again).
+power off (hold the power button, then switch on again). If you do have
+to switch it off, the notes so far are already on the USB stick: please
+send the folder reports/nuclab-...-dvlab from the stick.
 
 As before, the TV then shows a test picture a few times for about 25
 seconds each, and this screen asks what you saw. Watch the top-right
@@ -263,8 +320,13 @@ wait_enter "Press Enter when you are ready."
 # --- switch to LS mode -------------------------------------------------------
 # Each DDC variant must bring up an HDMI-A connector AND a picture the
 # volunteer can read; otherwise try the next one, then switch back.
-MODE=""
-for m in 1 2; do
+# Mode 2 (EDID through the LSPCON's I2C-over-AUX bridge) first: the MCDP28x0
+# datasheet lists I2C-over-AUX to 5V DDC translation for level-shifter mode.
+# Mode 1 (GMBUS) needs the GPU's DDC pins wired to the LSPCON's AUX/DDC pins,
+# which the datasheet does not show for a motherboard-down design.
+MODE="" try=0
+for m in 2 1; do
+	try=$((try + 1))
 	rebind "$m"
 	if ! hdmi_connected 25; then
 		note "mode $m: no HDMI-A connector came up"
@@ -275,7 +337,7 @@ for m in 1 2; do
 	snapshot "ls-mode-$m"
 	clear
 	echo "=================================================================="
-	echo "  The chip is now in the new mode (try $m of 2)."
+	echo "  The chip is now in the new mode (try $try of 2)."
 	echo "=================================================================="
 	echo
 	if [ -n "$TEST" ]; then
@@ -287,6 +349,7 @@ for m in 1 2; do
 		if IFS= read -r -t 120 _; then seen=1; else seen=""; fi
 	fi
 	rec "ls_mode_try=$m connector=yes seen=${seen:-no}"
+	progress "mode $m seen=${seen:-no}"
 	if [ -n "$seen" ]; then MODE=$m; break; fi
 	note "mode $m: screen not confirmed"
 done
@@ -338,6 +401,7 @@ step() {
 		IFS= read -r -t 300 notes || notes=""
 	fi
 	rec "step=$N name=$name frame=$frame dv=$dv mode=$MODE rc=$rc logo=$q1 picture=$q2 q3=$q3 odd=$q4 note=$notes"
+	progress "step $N $name done"
 }
 
 if [ -n "$MODE" ]; then

@@ -88,6 +88,39 @@ one from the `route:` line of the lab debugfs file.
 The lab image also boots with `i915.qms=0`: the yblod QMS VTEM is 36 bytes,
 and the gen9 GMP DIP is 32.
 
+## v0.3.1: black screen in the level-shifter round
+
+The NUC7 volunteer got a black screen in the v0.3.0 LS round, and no report
+came back: `nuclab-main` saved the report only after `dvlab.sh` finished, so
+a forced power-off lost everything. The MCDP28x0 datasheet (Rev B,
+C28x0-DAT-01p) has no register map. It confirms LS mode (AC-coupled TMDS
+repeater up to 340 Mchar/s, HDMI 1.4b), I2C-over-AUX to 5V DDC translation
+in LS mode, and HPD_OUT following HPD_IN. The AUX pins double as DDC, with
+AUX/I2C auto-detect.
+
+- **Live copy on the stick:** `reports/nuclab-<id>-dvlab/` gets `OUTDIR`,
+  `progress.txt` and the kernel log at each checkpoint (before and after each
+  rebind, each snapshot, each step) and every 10 s from a separate process,
+  so it keeps saving while the script is stuck in an unbind/bind.
+- **Mode 2 first:** EDID over the LSPCON's I2C-over-AUX, the path the
+  datasheet documents for LS mode. GMBUS (mode 1) is the fallback.
+- **Console rebind waits for i915's framebuffer** (up to 30 s) instead of a
+  fixed 3 s sleep. The log records when it came back and the vtcon state.
+- **`video=HDMI-A-1:1920x1080@60`** on the dvlab cmdline: the LS-mode console
+  runs at 148.5 MHz instead of the TV's preferred mode. `dvprobe` still sets
+  its 4K modes explicitly, and PCON mode (`DP-1`) is unaffected.
+
+The volunteer reports the TV said **"No Signal"**: no TMDS reached it, so
+this is not (only) the console. Report #9 rules out the VBT drive level
+(`Port B VBT HDMI level shift: 8`, the normal default). The likeliest causes
+are that port B's HDMI-A connector never came up connected (nothing driven),
+or the volunteer powered off during the expected black period. Each snapshot
+now also records, read-only, the dual-mode registers 0x00-0x4F at I2C 0x40
+on AUX B (0x20 TMDS output disable, 0x41 LSPCON current mode) and
+`i915_display_info` (which pipe drives which port, at what clock). Port C
+(USB-C) also has an HDMI connector, so `video=` names both HDMI-A-1 and
+HDMI-A-2.
+
 ## The LG C3's EDID (plan section 6.1)
 
 The EDID was already in the first report (`raw/modetest`, connector DP-1, 256

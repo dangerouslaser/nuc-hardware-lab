@@ -35,6 +35,9 @@ if [ "$variant" = dvlab ]; then
 	# return to the survey without changing anything.
 	grep -q "display experiments are not available" "$log" ||
 		{ echo "SMOKE TEST: dvlab.sh did not run"; exit 1; }
+	# The live copy on the stick (kept even if the run is cut short).
+	ls "$repo"/out/qemu-reports/reports/nuclab-*-dvlab/progress.txt >/dev/null 2>&1 ||
+		{ echo "SMOKE TEST: no live dvlab folder on the stick"; exit 1; }
 fi
 grep NUCLAB-MODULE-OK "$log"
 echo "SMOKE TEST: passed"
